@@ -1,0 +1,80 @@
+// Device tree overlay to enable I2S on Raspberry Pi.
+//
+// SX1255 is configured from userspace through SPIDEV,
+// so there is no codec to control through the sound subsystem.
+// spdif-dir and spdif-dit are used as dummy codecs.
+//
+// Some useful references:
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/sound/simple-card.txt
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/sound/spdif-receiver.txt
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/sound/spdif-transmitter.txt
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&i2s>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+			dummy_codec_rx: spdif-receiver {
+				compatible = "linux,spdif-dir";
+				status = "okay";
+				#sound-dai-cells = <0>;
+			};
+			dummy_codec_tx: spdif-transmitter {
+				compatible = "linux,spdif-dit";
+				status = "okay";
+				#sound-dai-cells = <0>;
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&sound>;
+		__overlay__ {
+			compatible = "simple-audio-card";
+			status = "okay";
+
+			simple-audio-card,name = "SX1255";
+
+			simple-audio-card,dai-link@0 {
+				format = "i2s";
+				bitclock-master = <&sac_codec_rx>;
+				frame-master = <&sac_codec_rx>;
+
+				sac_cpu_rx: cpu {
+					sound-dai = <&i2s>;
+					dai-tdm-slot-num = <2>;
+					dai-tdm-slot-width = <32>;
+				};
+				sac_codec_rx: codec {
+					sound-dai = <&dummy_codec_rx>;
+				};
+			};
+			simple-audio-card,dai-link@1 {
+				format = "i2s";
+				bitclock-master = <&sac_codec_tx>;
+				frame-master = <&sac_codec_tx>;
+
+				sac_cpu_tx: cpu {
+					sound-dai = <&i2s>;
+					dai-tdm-slot-num = <2>;
+					dai-tdm-slot-width = <32>;
+				};
+				sac_codec_tx: codec {
+					sound-dai = <&dummy_codec_tx>;
+				};
+			};
+		};
+
+	};
+};
