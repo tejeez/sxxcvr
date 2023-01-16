@@ -3,7 +3,7 @@
 # We recommend that the support module be built in-tree with the driver.
 ########################################################################
 cmake_minimum_required(VERSION 2.6)
-project(SoapySDRMyDevice CXX)
+project(SoapySX CXX)
 enable_testing()
 
 #select the release build type by default to get optimization flags
@@ -32,7 +32,7 @@ endif ()
 
 include_directories(${MY_DEVICE_INCLUDE_DIRS})
 SOAPY_SDR_MODULE_UTIL(
-    TARGET MyDevice
-    SOURCES MyDeviceSupport.cpp
+    TARGET SXSupport
+    SOURCES SoapySX.cpp
     LIBRARIES ${MY_DEVICE_LIBRARIES}
 )

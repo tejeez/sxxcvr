@@ -2,7 +2,7 @@
 
 Install dependencies:
 ```
-sudo apt install git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev
+sudo apt install git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev soapysdr-tools python3-soapysdr
 ```
 
 Install device tree blob:
@@ -32,4 +32,9 @@ cd build
 cmake ..
 make -j4
 sudo make install
+```
+
+Check that the module is found:
+```
+SoapySDRUtil --probe=driver=sx
 ```

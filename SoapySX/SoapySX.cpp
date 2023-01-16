@@ -1,40 +1,50 @@
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Registry.hpp>
+#include <SoapySDR/Logger.hpp>
 
 /***********************************************************************
  * Device interface
  **********************************************************************/
-class MyDevice : public SoapySDR::Device
+class SoapySX : public SoapySDR::Device
 {
-    //Implement constructor with device specific arguments...
+public:
+    SoapySX(const SoapySDR::Kwargs &args)
+    {
+        (void)args;
+        SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapySX");
+    }
 
-    //Implement all applicable virtual methods from SoapySDR::Device
+    ~SoapySX(void)
+    {
+        SoapySDR_logf(SOAPY_SDR_INFO, "Uninitializing SoapySX");
+    }
 };
 
 /***********************************************************************
  * Find available devices
  **********************************************************************/
-SoapySDR::KwargsList findMyDevice(const SoapySDR::Kwargs &args)
+static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
 {
     (void)args;
-    //locate the device on the system...
-    //return a list of 0, 1, or more argument maps that each identify a device
+    SoapySDR::KwargsList devices;
 
-    return SoapySDR::KwargsList();
+    // TODO: check whether a device is actually found
+
+    SoapySDR::Kwargs device;
+    devices.push_back(device);
+
+    return devices;
 }
 
 /***********************************************************************
  * Make device instance
  **********************************************************************/
-SoapySDR::Device *makeMyDevice(const SoapySDR::Kwargs &args)
+static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args)
 {
-    (void)args;
-    //create an instance of the device object given the args
-    //here we will translate args into something used in the constructor
-    return new MyDevice();
+    return new SoapySX(args);
 }
 
 /***********************************************************************
  * Registration
  **********************************************************************/
-static SoapySDR::Registry registerMyDevice("my_device", &findMyDevice, &makeMyDevice, SOAPY_SDR_ABI_VERSION);
+static SoapySDR::Registry registerDevice("sx", &findDevice, &makeDevice, SOAPY_SDR_ABI_VERSION);
