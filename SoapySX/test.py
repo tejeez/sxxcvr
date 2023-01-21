@@ -23,8 +23,12 @@ def main():
     print('')
 
     # Test writing registers.
-    # This should start transmitting at 433.92 MHz.
-    device.writeRegisters('', 4, (0xD8, 0xF5, 0xC3))
+    # I2S at 125 kHz: CLKOUT divider 4, decimate by 256
+    device.writeRegisters('', 0x12, (0b00100010, 0b00101000))
+    # Receive on 433.9 MHz and transmit on 433.92 MHz.
+    # The receiver should see a 20 kHz tone from TX-RX leakage.
+    device.writeRegisters('', 1, (0xD8, 0xF3, 0x33, 0xD8, 0xF5, 0xC3))
+    # Enable RX and TX
     device.writeRegisters('', 0, (0x0F,))
 
 if __name__ == '__main__':
