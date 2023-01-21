@@ -43,6 +43,7 @@ private:
     // a single unsigned int for the data.
     // Here is a function that also allows longer transfers.
     int spi_transfer(const uint8_t *tx_data, uint8_t *rx_data, const size_t numBytes)
+    const
     {
         if (spi < 0)
             return -1;
@@ -53,6 +54,7 @@ private:
         transfer.tx_buf = (__u64)tx_data;
         transfer.rx_buf = (__u64)rx_data;
         transfer.len = (__u32)numBytes;
+        transfer.speed_hz = 10000000;
 
         int ret = ioctl(spi, SPI_IOC_MESSAGE(1), &transfer);
         SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV ioctl: %d", ret);
@@ -91,6 +93,54 @@ public:
             received = (received << 8) | (unsigned)buf[i];
         return received;
     }
+
+    std::vector<unsigned> readRegisters(
+        const std::string & name,
+        const unsigned addr,
+        const size_t length
+    ) const
+    {
+        (void)name; // Ignore name since there's only one register bank
+
+        // Buffer for SPI transfer
+        size_t transfer_len = length + 1;
+        uint8_t *buf = new uint8_t[transfer_len];
+
+        buf[0] = addr;
+        for (size_t i = 1; i < transfer_len; i++)
+            buf[i] = 0;
+
+        int ret = spi_transfer(buf, buf, transfer_len);
+
+        if ((size_t)ret != transfer_len)
+            return std::vector<unsigned>(0, 0); // error
+
+        std::vector<unsigned> result(length, 0);
+        for (size_t i = 0; i < length; i++)
+            result[i] = buf[i+1];
+
+        delete buf;
+        return result;
+	}
+
+    void writeRegisters(
+        const std::string & name,
+        const unsigned addr,
+        const std::vector<unsigned> & value
+    )
+    {
+        (void)name; // Ignore name since there's only one register bank
+
+        // Buffer for SPI transfer
+        size_t transfer_len = value.size() + 1;
+        uint8_t *buf = new uint8_t[transfer_len];
+
+        buf[0] = addr | 0x80;
+        for (size_t i = 1; i < transfer_len; i++)
+            buf[i] = value[i-1];
+
+        spi_transfer(buf, buf, transfer_len);
+	}
 };
 
 /***********************************************************************
