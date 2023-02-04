@@ -17,7 +17,7 @@
 // and convert it to an integer.
 // The value is offset so that the minimum value becomes 0
 // and scaled so that step becomes 1.
-static int scale_from_range(SoapySDR::Range range, double value)
+static int32_t scale_from_range(SoapySDR::Range range, double value)
 {
     return (int)std::round(
         (std::min(std::max(value, range.minimum()), range.maximum())
@@ -25,7 +25,7 @@ static int scale_from_range(SoapySDR::Range range, double value)
 }
 
 // Inverse of scale_from_range.
-static double scale_to_range(SoapySDR::Range range, int value)
+static double scale_to_range(SoapySDR::Range range, int32_t value)
 {
     return std::min(std::max(
         range.minimum() + range.step() * (double)value,
@@ -75,6 +75,8 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
 class SoapySX : public SoapySDR::Device
 {
 private:
+    double masterClock;
+
     // SPIDEV file descriptor
     int spi;
 
@@ -200,6 +202,7 @@ private:
 
 public:
     SoapySX(const SoapySDR::Kwargs &args):
+        masterClock(32.0e6),
         spi(-1),
         alsa_rx(NULL),
         alsa_tx(NULL),
@@ -297,6 +300,50 @@ alsa_error:
         return 125000.0;
     }
 
+    void setFrequency(
+        const int direction,
+        const size_t channel,
+        const double frequency,
+        const SoapySDR::Kwargs & args
+    )
+    {
+        (void)channel; (void)args;
+        const double step = masterClock * (1.0 / (double)(1L<<20));
+        const uint32_t quantized = (uint32_t)scale_from_range(
+            SoapySDR::Range(0, step * (double)((1L<<24)-1), step),
+            frequency);
+        if (direction == SOAPY_SDR_RX) {
+            set_register_bits(0x01, 0, 8, quantized >> 16);
+            set_register_bits(0x02, 0, 8, (quantized >> 8) & 0xFF);
+            set_register_bits(0x03, 0, 8, quantized & 0xFF);
+            write_registers_to_chip(0x01, 3);
+        } else {
+            set_register_bits(0x04, 0, 8, quantized >> 16);
+            set_register_bits(0x05, 0, 8, (quantized >> 8) & 0xFF);
+            set_register_bits(0x06, 0, 8, quantized & 0xFF);
+            write_registers_to_chip(0x04, 3);
+        }
+    }
+
+    double getFrequency(
+        const int direction,
+        const size_t channel
+    ) const
+    {
+        (void)channel;
+        const double step = masterClock * (1.0 / (double)(1L<<20));
+        if (direction == SOAPY_SDR_RX)
+            return step * (
+                (((uint32_t)regs[1]) << 16) |
+                (((uint32_t)regs[2]) << 8) |
+                 ((uint32_t)regs[3]));
+        else
+            return step * (
+                (((uint32_t)regs[4]) << 16) |
+                (((uint32_t)regs[5]) << 8) |
+                 ((uint32_t)regs[6]));
+    }
+
     std::vector<std::string> listGains(
         const int direction,
         const size_t channel
@@ -333,7 +380,7 @@ alsa_error:
         const double value
     )
     {
-        int quantized = scale_from_range(getGainRange(direction, channel, name), value);
+        int32_t quantized = scale_from_range(getGainRange(direction, channel, name), value);
         if (direction == SOAPY_SDR_RX) {
             if (name == "ZIN") {
                 set_register_bits(0x0C, 0, 1, quantized);

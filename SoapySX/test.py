@@ -29,9 +29,15 @@ def main():
 
     # Test writing registers.
     # Enable RX and TX
-    #device.writeRegisters('', 0, (0x0F,))
-    # Enable RX only
-    device.writeRegisters('', 0, (0x03,))
+    device.writeRegisters('', 0, (0x0F,))
+
+    # Test frequency settings.
+    device.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, 434.0123456789e6)
+    device.setFrequency(SoapySDR.SOAPY_SDR_TX, 0, 434.123456789e6)
+    print("getFrequency:",
+        device.getFrequency(SoapySDR.SOAPY_SDR_RX, 0),
+        device.getFrequency(SoapySDR.SOAPY_SDR_TX, 0))
+
 
     print_registers()
 
