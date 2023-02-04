@@ -13,6 +13,25 @@
 #include <alsa/asoundlib.h>
 #include <alsa/control.h>
 
+// Clamp, offset, scale and quantize a value based on a SoapySDR::Range
+// and convert it to an integer.
+// The value is offset so that the minimum value becomes 0
+// and scaled so that step becomes 1.
+static int scale_from_range(SoapySDR::Range range, double value)
+{
+    return (int)std::round(
+        (std::min(std::max(value, range.minimum()), range.maximum())
+         - range.minimum()) / range.step());
+}
+
+// Inverse of scale_from_range.
+static double scale_to_range(SoapySDR::Range range, int value)
+{
+    return std::min(std::max(
+        range.minimum() + range.step() * (double)value,
+        range.minimum()), range.maximum());
+}
+
 #define MAX_REGS 0x80
 
 // Number of initial register values for SX1255.
@@ -276,6 +295,71 @@ alsa_error:
         (void)direction; (void)channel;
         // Fixed sample rate for now
         return 125000.0;
+    }
+
+    std::vector<std::string> listGains(
+        const int direction,
+        const size_t channel
+    ) const
+    {
+        (void)channel;
+        if (direction == SOAPY_SDR_RX)
+            return std::vector<std::string>{"ZIN", "LNA", "PGA"};
+        else
+            return std::vector<std::string>{"DAC", "MIXER"};
+    }
+
+    SoapySDR::Range getGainRange(
+        const int direction,
+        const size_t channel,
+        const std::string & name
+    ) const
+    {
+        (void)channel;
+        std::map<std::pair<const int, const std::string>, const SoapySDR::Range> gainRanges = {
+            {{SOAPY_SDR_RX, "ZIN"}, {50, 200, 150}}, // not really a gain setting
+            {{SOAPY_SDR_RX, "LNA"}, {-48, 0, 6}},
+            {{SOAPY_SDR_RX, "PGA"}, {0, 30, 2}},
+            {{SOAPY_SDR_TX, "DAC"}, {-9, 0, 3}},
+            {{SOAPY_SDR_TX, "MIXER"}, {-37.5, -7.5, 2}},
+        };
+        return gainRanges.at(std::pair<const int, const std::string>(direction, name));
+    }
+
+    void setGain(
+        const int direction,
+        const size_t channel,
+        const std::string & name,
+        const double value
+    )
+    {
+        int quantized = scale_from_range(getGainRange(direction, channel, name), value);
+        if (direction == SOAPY_SDR_RX) {
+            if (name == "ZIN") {
+                set_register_bits(0x0C, 0, 1, quantized);
+            } else if (name == "LNA") {
+                // LNA gain does not have a constant step,
+                // so some extra logic is needed.
+                if (quantized <= 6) // -48 to -12 dB
+                    set_register_bits(0x0C, 5, 3, 6-quantized/2);
+                else if (quantized == 7) // -6 dB
+                    set_register_bits(0x0C, 5, 3, 2);
+                else // 0 dB
+                    set_register_bits(0x0C, 5, 3, 1);
+            } else if (name == "PGA") {
+                set_register_bits(0x0C, 1, 4, quantized);
+            }
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "RXFE1=0x%02x", regs[0x0C]);
+            write_registers_to_chip(0x0C, 1);
+        } else {
+            if (name == "DAC") {
+                set_register_bits(0x08, 4, 3, 3-quantized);
+            } else if (name == "MIXER") {
+                set_register_bits(0x08, 0, 4, quantized);
+            }
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "TXFE1=0x%02x", regs[0x08]);
+            write_registers_to_chip(0x08, 1);
+        }
     }
 
     // Wrap spi_transfer so that short raw SPI transfers
