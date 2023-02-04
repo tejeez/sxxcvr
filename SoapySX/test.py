@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Some tests for the SoapySX module."""
 
+import traceback
+
 import SoapySDR
 
 def main():
@@ -14,22 +16,31 @@ def main():
     # using the raw SPI transfer API.
     print("%04x" % device.transactSPI(0, 0x0700, 16))
 
-    # Test reading all registers, including possible undocumented ones
-    # with addresses above 0x13.
-    # Reading past 0x7F apparently starts writing registers,
-    # so stop there.
-    for i, v in enumerate(device.readRegisters('', 0, 0x80)):
-        print('%02X=%02X' % (i,v), end='\t ')
-    print('')
+    def print_registers():
+        """Test reading all registers, including possible undocumented ones
+        with addresses above 0x13.
+        Reading past 0x7F apparently starts writing registers,
+        so stop there."""
+        for i, v in enumerate(device.readRegisters('', 0, 0x80)):
+            print('%02X=%02X' % (i,v), end='\t ')
+        print('')
+
+    print_registers()
 
     # Test writing registers.
-    # I2S at 125 kHz: CLKOUT divider 4, decimate by 256
-    device.writeRegisters('', 0x12, (0b00100010, 0b00101000))
-    # Receive on 433.9 MHz and transmit on 433.92 MHz.
-    # The receiver should see a 20 kHz tone from TX-RX leakage.
-    device.writeRegisters('', 1, (0xD8, 0xF3, 0x33, 0xD8, 0xF5, 0xC3))
     # Enable RX and TX
-    device.writeRegisters('', 0, (0x0F,))
+    #device.writeRegisters('', 0, (0x0F,))
+    # Enable RX only
+    device.writeRegisters('', 0, (0x03,))
+
+    print_registers()
+
+    # Test writing too many registers.
+    # This should result in an error.
+    try:
+        device.writeRegisters('', 0x7E, (0, 0, 0,))
+    except:
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main()
