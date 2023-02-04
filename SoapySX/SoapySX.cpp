@@ -10,6 +10,9 @@
 #include <linux/types.h>
 #include <linux/spi/spidev.h>
 
+#include <alsa/asoundlib.h>
+#include <alsa/control.h>
+
 #define MAX_REGS 0x80
 
 // Number of initial register values for SX1255.
@@ -55,6 +58,9 @@ class SoapySX : public SoapySDR::Device
 private:
     // SPIDEV file descriptor
     int spi;
+
+    snd_pcm_t *alsa_rx;
+    snd_pcm_t *alsa_tx;
 
     // Values of registers (to be) written to the chip.
     // Storing them here makes it easier and faster to change
@@ -116,12 +122,68 @@ private:
     {
         for (size_t i = 0; i < N_INIT_REGISTERS; i++)
             set_register_bits(i, 0, 8, init_registers[i]);
+        // Enable RX, just for initial testing. This should be done somewhere else.
+        set_register_bits(0, 1, 1, 1);
         write_registers_to_chip(0, N_INIT_REGISTERS);
+    }
+
+#define ALSACHECK(a) do {\
+    int retcheck = (a); \
+    if (retcheck < 0) { \
+    SoapySDR_logf(SOAPY_SDR_DEBUG, "\nALSA error in %s: %s\n", #a, snd_strerror(retcheck)); \
+    goto alsa_error; } } while(0)
+
+    // Open and configure ALSA for one direction.
+    static snd_pcm_t *init_alsa_dir(const char *name, snd_pcm_stream_t dir)
+    {
+        snd_pcm_t *pcm = NULL;
+        snd_pcm_hw_params_t *hwp;
+
+        unsigned hwp_periods = 0;
+        snd_pcm_uframes_t hwp_buffer_size = 0;
+
+        ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
+        ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
+        ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
+        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, SND_PCM_ACCESS_RW_INTERLEAVED));
+        ALSACHECK(snd_pcm_hw_params_set_format(pcm, hwp, SND_PCM_FORMAT_S32_LE));
+        // Sample rate given to ALSA does not affect the actual sample rate,
+        // so just use a fixed "dummy" value.
+        ALSACHECK(snd_pcm_hw_params_set_rate(pcm, hwp, 192000, 0));
+        ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
+        ALSACHECK(snd_pcm_hw_params_set_periods_first(pcm, hwp, &hwp_periods, 0));
+        ALSACHECK(snd_pcm_hw_params_set_buffer_size_last(pcm, hwp, &hwp_buffer_size));
+
+        ALSACHECK(snd_pcm_hw_params(pcm, hwp));
+
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: periods=%u, buffer_size=%d", hwp_periods, hwp_buffer_size);
+        return pcm;
+    alsa_error:
+        if (pcm != NULL)
+            snd_pcm_close(pcm);
+        return NULL;
+    }
+
+    void init_alsa(void)
+    {
+        // TODO: support custom ALSA names as a arguments
+        alsa_rx = init_alsa_dir("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE);
+        alsa_tx = init_alsa_dir("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK);
+    }
+
+    void close_alsa(void)
+    {
+        if (alsa_rx != NULL)
+            snd_pcm_close(alsa_rx);
+        if (alsa_tx != NULL)
+            snd_pcm_close(alsa_tx);
     }
 
 public:
     SoapySX(const SoapySDR::Kwargs &args):
         spi(-1),
+        alsa_rx(NULL),
+        alsa_tx(NULL),
         regs{0}
     {
         (void)args;
@@ -133,11 +195,14 @@ public:
         SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV opened: %d", spi);
 
         init_chip();
+        init_alsa();
     }
 
     ~SoapySX(void)
     {
         SoapySDR_logf(SOAPY_SDR_INFO, "Uninitializing SoapySX");
+
+        close_alsa();
 
         // Put SX1255 to sleep
         set_register_bits(0, 0, 4, 0);
@@ -145,6 +210,72 @@ public:
 
         if (spi >= 0)
             close(spi);
+    }
+
+    int activateStream(
+        SoapySDR::Stream * stream,
+        const int flags,
+        const long long timeNs,
+        const size_t numElems
+    )
+    {
+        (void)stream; (void)flags; (void)timeNs; (void)numElems;
+        SoapySDR_logf(SOAPY_SDR_INFO, "Activating stream");
+        ALSACHECK(snd_pcm_prepare(alsa_rx));
+        ALSACHECK(snd_pcm_start(alsa_rx));
+        return 0;
+alsa_error:
+        return SOAPY_SDR_STREAM_ERROR;
+    }
+
+    int readStream(
+        SoapySDR::Stream * stream,
+        void *const * buffs,
+        const size_t numElems,
+        int & flags,
+        long long & timeNs,
+        const long timeoutUs
+    )
+    {
+        (void)stream; (void)timeNs;
+        (void)timeoutUs; // TODO: timeout
+        flags = 0;
+
+        std::vector<int32_t> raw(numElems*2);
+        snd_pcm_sframes_t nread = snd_pcm_readi(alsa_rx, raw.data(), numElems);
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_readi: %d", nread);
+        if (nread <= 0)
+            return SOAPY_SDR_STREAM_ERROR;
+
+        // Fixed CF32 format for initial testing
+
+        float *converted = (float*)buffs[0];
+        const float scaling = 1.0f / 0x80000000L;
+        for (size_t i = 0; i < (size_t)nread*2; i++)
+        {
+            converted[i] = scaling * (float)raw[i];
+        }
+        return nread;
+    }
+
+    void setSampleRate(
+        const int direction,
+        const size_t channel,
+        const double rate
+    )
+    {
+        // TODO (fixed sample rate for now)
+        (void)direction; (void)channel; (void)rate;
+    }
+
+    double getSampleRate(
+        const int direction,
+        const size_t channel
+    ) const
+    {
+        (void)direction; (void)channel;
+        // Fixed sample rate for now
+        return 125000.0;
     }
 
     // Wrap spi_transfer so that short raw SPI transfers
@@ -204,7 +335,7 @@ public:
             result[i] = buf[i+1];
 
         return result;
-	}
+    }
 
     void writeRegisters(
         const std::string & name,
@@ -218,7 +349,12 @@ public:
             set_register_bits(addr + i, 0, 8, value[i]);
 
         write_registers_to_chip(addr, value.size());
-	}
+    }
+
+    std::string getDriverKey(void)
+    {
+        return "sx";
+    }
 };
 
 /***********************************************************************
@@ -232,6 +368,8 @@ static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
     // TODO: check whether a device is actually found
 
     SoapySDR::Kwargs device;
+    device["label"] = "sx";
+    device["driver"] = "sx";
     devices.push_back(device);
 
     return devices;

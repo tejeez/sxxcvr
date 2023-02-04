@@ -2,7 +2,7 @@
 
 Install dependencies:
 ```
-sudo apt install git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev soapysdr-tools python3-soapysdr
+sudo apt install git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev libasound2-dev soapysdr-tools python3-soapysdr
 ```
 
 Install device tree blob:
