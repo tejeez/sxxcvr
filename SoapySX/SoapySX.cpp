@@ -200,6 +200,10 @@ private:
             snd_pcm_close(alsa_tx);
     }
 
+/***********************************************************************
+ * Initialization and destruction
+ **********************************************************************/
+
 public:
     SoapySX(const SoapySDR::Kwargs &args):
         masterClock(32.0e6),
@@ -233,6 +237,10 @@ public:
         if (spi >= 0)
             close(spi);
     }
+
+/***********************************************************************
+ * Sample streams
+ **********************************************************************/
 
     int activateStream(
         SoapySDR::Stream * stream,
@@ -280,6 +288,28 @@ alsa_error:
         return nread;
     }
 
+/***********************************************************************
+ * Sample rates
+ **********************************************************************/
+
+    std::vector<double> listSampleRates(const int direction, const size_t channel) const
+    {
+        (void)direction; (void)channel;
+        std::vector<double> sampleRates{125000.0};
+        return sampleRates;
+    }
+
+    // Wrapper for listSampleRates to support both methods
+    SoapySDR::RangeList getSampleRateRange(const int direction, const size_t channel) const
+    {
+        const auto sampleRates = listSampleRates(direction, channel);
+        SoapySDR::RangeList ranges;
+        for (const auto sampleRate: sampleRates) {
+            ranges.push_back({sampleRate, sampleRate, 0});
+        }
+        return ranges;
+    }
+
     void setSampleRate(
         const int direction,
         const size_t channel,
@@ -299,6 +329,10 @@ alsa_error:
         // Fixed sample rate for now
         return 125000.0;
     }
+
+/***********************************************************************
+ * Center frequency
+ **********************************************************************/
 
     void setFrequency(
         const int direction,
@@ -344,6 +378,10 @@ alsa_error:
                  ((uint32_t)regs[6]));
     }
 
+/***********************************************************************
+ * Gains
+ **********************************************************************/
+
     std::vector<std::string> listGains(
         const int direction,
         const size_t channel
@@ -351,7 +389,7 @@ alsa_error:
     {
         (void)channel;
         if (direction == SOAPY_SDR_RX)
-            return std::vector<std::string>{"ZIN", "LNA", "PGA"};
+            return std::vector<std::string>{"ZIN", "LNA", "PGA", "ADCTRIM"};
         else
             return std::vector<std::string>{"DAC", "MIXER"};
     }
@@ -367,6 +405,7 @@ alsa_error:
             {{SOAPY_SDR_RX, "ZIN"}, {50, 200, 150}}, // not really a gain setting
             {{SOAPY_SDR_RX, "LNA"}, {-48, 0, 6}},
             {{SOAPY_SDR_RX, "PGA"}, {0, 30, 2}},
+            {{SOAPY_SDR_RX, "ADCTRIM"}, {0, 7, 1}}, // not a gain setting
             {{SOAPY_SDR_TX, "DAC"}, {-9, 0, 3}},
             {{SOAPY_SDR_TX, "MIXER"}, {-37.5, -7.5, 2}},
         };
@@ -395,9 +434,15 @@ alsa_error:
                     set_register_bits(0x0C, 5, 3, 1);
             } else if (name == "PGA") {
                 set_register_bits(0x0C, 1, 4, quantized);
+            } else if (name == "ADCTRIM") {
+                // This is not a gain setting but making it appear as one
+                // is the easiest way to test how it affects reception.
+                set_register_bits(0x0D, 2, 3, quantized);
             }
             SoapySDR_logf(SOAPY_SDR_DEBUG, "RXFE1=0x%02x", regs[0x0C]);
-            write_registers_to_chip(0x0C, 1);
+            // Write 2 registers for the ADCTRIM setting.
+            // Can be changed back to 1 if ADCTRIM is removed from gains.
+            write_registers_to_chip(0x0C, 2);
         } else {
             if (name == "DAC") {
                 set_register_bits(0x08, 4, 3, 3-quantized);
@@ -408,6 +453,10 @@ alsa_error:
             write_registers_to_chip(0x08, 1);
         }
     }
+
+/***********************************************************************
+ * Low level interfaces
+ **********************************************************************/
 
     // Wrap spi_transfer so that short raw SPI transfers
     // are possible through the SoapySDR API.
@@ -482,9 +531,35 @@ alsa_error:
         write_registers_to_chip(addr, value.size());
     }
 
-    std::string getDriverKey(void)
+/***********************************************************************
+ * Other hardware and driver information
+ **********************************************************************/
+
+    std::string getDriverKey(void) const
     {
         return "sx";
+    }
+
+    std::string getHardwareKey(void) const
+    {
+        return "sx";
+    }
+
+    SoapySDR::Kwargs getHardwareInfo(void) const
+    {
+        SoapySDR::Kwargs args;
+        return args;
+    }
+
+    size_t getNumChannels(const int direction) const
+    {
+        return 1;
+    }
+
+    std::vector<std::string> listAntennas(const int direction, const size_t channel) const
+    {
+        std::vector<std::string> antennas = {"ANT"};
+        return antennas;
     }
 };
 
