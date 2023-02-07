@@ -2,20 +2,13 @@
 
 Install dependencies:
 ```
-sudo apt install git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev libasound2-dev soapysdr-tools python3-soapysdr
+sudo apt-get install --no-install-recommends git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev libasound2-dev soapysdr-tools python3-soapysdr
 ```
 
 Install device tree blob:
 ```
 cd dts
-./install_dtb.sh
-```
-
-Add the following lines to `/boot/config.txt`:
-```
-dtparam=i2s=on
-dtparam=spi=on
-dtoverlay=sx1255
+./install_raspberrypi.sh
 ```
 
 Reboot the machine and check that the audio device is found:
@@ -32,6 +25,7 @@ cd build
 cmake ..
 make -j4
 sudo make install
+sudo ldconfig
 ```
 
 Check that the module is found:
