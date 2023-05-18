@@ -435,7 +435,19 @@ public:
         std::vector<int32_t> raw(numElems*2);
         snd_pcm_sframes_t nread = snd_pcm_readi(alsa_rx, raw.data(), numElems);
         SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_readi: %d", nread);
-        if (nread <= 0)
+        if (nread < 0) {
+            // Some error (usually overrun) has happened.
+            // Recover the stream automatically, so that the next read
+            // will probably work again.
+            // Some more testing and experimentation might be needed
+            // to see whether this is the best way to do it,
+            // particularly for linked streams. I am not sure yet.
+            int ret = snd_pcm_recover(alsa_rx, nread, 1);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (RX): %d", ret);
+        }
+        if (nread == -EPIPE) // Overrun error
+            return SOAPY_SDR_OVERFLOW;
+        if (nread <= 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
 
         // Fixed CF32 format for initial testing
@@ -488,7 +500,16 @@ public:
 
         snd_pcm_sframes_t nwritten = snd_pcm_writei(alsa_tx, raw.data(), numElems);
         SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_writei: %d", nwritten);
-        if (nwritten <= 0)
+        if (nwritten < 0) {
+            // Some error (usually underrun) has happened.
+            // Recover the stream automatically, so that the next write
+            // will probably work again.
+            int ret = snd_pcm_recover(alsa_tx, nwritten, 1);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (TX): %d", ret);
+        }
+        if (nwritten == -EPIPE) // Underrun error
+            return SOAPY_SDR_UNDERFLOW;
+        if (nwritten <= 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
         return nwritten;
     }
