@@ -26,6 +26,7 @@ static int32_t scale_from_range(SoapySDR::Range range, double value)
 }
 
 // Inverse of scale_from_range.
+[[maybe_unused]]
 static double scale_to_range(SoapySDR::Range range, int32_t value)
 {
     return std::min(std::max(
@@ -125,6 +126,24 @@ public:
 };
 
 
+// Stream object created and returned by setupStream.
+// Currently, it only stores stream direction.
+// Maybe some other streaming related code could be moved here too.
+class SoapySXStream {
+private:
+    int direction;
+public:
+    SoapySXStream(const int direction):
+        direction(direction)
+    {
+    }
+    bool is_tx() const
+    {
+        return direction != SOAPY_SDR_RX;
+    }
+};
+
+
 /***********************************************************************
  * Device interface
  **********************************************************************/
@@ -174,8 +193,8 @@ private:
     {
         for (size_t i = 0; i < N_INIT_REGISTERS; i++)
             set_register_bits(i, 0, 8, init_registers[i]);
-        // Enable RX, just for initial testing. This should be done somewhere else.
-        set_register_bits(0, 1, 1, 1);
+        // Enable RX and TX, just for initial testing. This should be done somewhere else.
+        set_register_bits(0, 1, 3, 0b111);
         write_registers_to_chip(0, N_INIT_REGISTERS);
     }
 
@@ -267,24 +286,69 @@ public:
  * Sample streams
  **********************************************************************/
 
+    SoapySDR::Stream *setupStream(
+        const int direction,
+        const std::string & format,
+        const std::vector<size_t> & channels,
+        const SoapySDR::Kwargs & args
+    )
+    {
+        (void)channels; // Only one channel
+        (void)args; // Unused for now
+        if (format != "CF32")
+            throw std::runtime_error("Only CF32 format is currently supported");
+        SoapySXStream *stream = new SoapySXStream(direction);
+        return reinterpret_cast<SoapySDR::Stream *>(stream);
+    }
+
+    void closeStream(SoapySDR::Stream * handle)
+    {
+        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        delete stream;
+    }
+
     int activateStream(
-        SoapySDR::Stream * stream,
+        SoapySDR::Stream * handle,
         const int flags,
         const long long timeNs,
         const size_t numElems
     )
     {
-        (void)stream; (void)flags; (void)timeNs; (void)numElems;
+        (void)flags; (void)timeNs; (void)numElems;
+        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
         SoapySDR_logf(SOAPY_SDR_INFO, "Activating stream");
-        ALSACHECK(snd_pcm_prepare(alsa_rx));
-        ALSACHECK(snd_pcm_start(alsa_rx));
+        if (stream->is_tx()) {
+            ALSACHECK(snd_pcm_prepare(alsa_tx));
+        } else {
+            ALSACHECK(snd_pcm_prepare(alsa_rx));
+            ALSACHECK(snd_pcm_start(alsa_rx));
+        }
         return 0;
-alsa_error:
+    alsa_error:
         return SOAPY_SDR_STREAM_ERROR;
     }
 
-    int readStream(
-        SoapySDR::Stream * stream,
+    int deactivateStream(
+        SoapySDR::Stream * handle,
+        const int flags,
+        const long long timeNs
+    )
+    {
+        (void)flags; (void)timeNs;
+        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        SoapySDR_logf(SOAPY_SDR_INFO, "Deactivating stream");
+        if (stream->is_tx()) {
+            ALSACHECK(snd_pcm_drop(alsa_tx));
+        } else {
+            ALSACHECK(snd_pcm_drop(alsa_rx));
+        }
+        return 0;
+    alsa_error:
+        return SOAPY_SDR_STREAM_ERROR;
+    }
+
+   int readStream(
+        SoapySDR::Stream * handle,
         void *const * buffs,
         const size_t numElems,
         int & flags,
@@ -292,8 +356,11 @@ alsa_error:
         const long timeoutUs
     )
     {
-        (void)stream; (void)timeNs;
+        (void)timeNs;
         (void)timeoutUs; // TODO: timeout
+        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        if (stream->is_tx())
+            throw std::runtime_error("Wrong direction");
         flags = 0;
 
         std::vector<int32_t> raw(numElems*2);
@@ -311,6 +378,50 @@ alsa_error:
             converted[i] = scaling * (float)raw[i];
         }
         return nread;
+    }
+
+   int writeStream(
+        SoapySDR::Stream * handle,
+        const void *const * buffs,
+        const size_t numElems,
+        int & flags,
+        long long timeNs,
+        const long timeoutUs
+    )
+    {
+        (void)timeNs;
+        (void)timeoutUs; // TODO: timeout
+        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        if (!stream->is_tx())
+            throw std::runtime_error("Wrong direction");
+        flags = 0;
+
+        // Format conversion
+        float *input = (float*)buffs[0];
+        std::vector<int32_t> raw(numElems*2);
+        const float scaling = (float)0x7FFFFFFFL;
+        for (size_t i = 0; i < numElems*2; i+=2)
+        {
+            int32_t vi = scaling * std::max(std::min(input[i  ], 1.0f), -1.0f);
+            int32_t vq = scaling * std::max(std::min(input[i+1], 1.0f), -1.0f);
+            // Second lowest bit of each "I" sample controls RX/TX switching.
+            // Set the lowest bit to the same value just in case.
+            // Let's also reserve the 2 lowest bits of "Q" samples
+            // for future extensions and keep them as 0.
+            bool tx_on = true;
+            vi &= 0xFFFFFFFCL;
+            vq &= 0xFFFFFFFCL;
+            if (tx_on)
+                vi |= 0b11L;
+            raw[i  ] = vi;
+            raw[i+1] = vq;
+        }
+
+        snd_pcm_sframes_t nwritten = snd_pcm_writei(alsa_tx, raw.data(), numElems);
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_writei: %d", nwritten);
+        if (nwritten <= 0)
+            return SOAPY_SDR_STREAM_ERROR;
+        return nwritten;
     }
 
 /***********************************************************************
@@ -544,12 +655,18 @@ alsa_error:
 
     size_t getNumChannels(const int direction) const
     {
+        (void)direction; // Same for both directions
         return 1;
     }
 
     std::vector<std::string> listAntennas(const int direction, const size_t channel) const
     {
-        std::vector<std::string> antennas = {"ANT"};
+        (void)channel; // Only one channel
+        std::vector<std::string> antennas;
+        if (direction == SOAPY_SDR_RX)
+            antennas.push_back("RX");
+        else
+            antennas.push_back("TX");
         return antennas;
     }
 };
