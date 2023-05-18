@@ -3,6 +3,7 @@
 #include <SoapySDR/Logger.hpp>
 
 #include <string.h>
+#include <cassert>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -69,6 +70,61 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
     0b00100010, 0b00101100,
 };
 
+
+// Class to use SPI through the SPI userspace API (SPIDEV) in Linux.
+// Putting it in a separate class helps use RAII to ensure
+// the file descriptor gets closed in all situations.
+class Spi {
+private:
+    // SPIDEV file descriptor
+    int fd;
+
+public:
+    Spi(const char *spidev_path)
+    {
+        assert(spidev_path != NULL);
+        fd = open(spidev_path, O_RDWR);
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV opened: %d", fd);
+        if (fd < 0) {
+            // TODO: add more detailed error messages from strerror or something
+            throw std::runtime_error("Failed to open SPI");
+        }
+    }
+
+    ~Spi()
+    {
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "Closing SPIDEV fd %d", fd);
+        close(fd);
+    }
+
+    int transfer(const uint8_t *tx_data, uint8_t *rx_data, const size_t len) const
+    {
+        struct spi_ioc_transfer transfer;
+        memset(&transfer, 0, sizeof(transfer));
+
+        transfer.tx_buf = (__u64)tx_data;
+        transfer.rx_buf = (__u64)rx_data;
+        transfer.len = (__u32)len;
+        transfer.speed_hz = 10000000;
+
+        int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV ioctl: %d", ret);
+
+        if ((size_t)ret != len)
+            throw std::runtime_error("SPI transfer failed");
+
+        return ret;
+    }
+
+    int transfer(const std::vector<uint8_t> &tx_data, std::vector<uint8_t> &rx_data) const
+    {
+        // Make sure data fits in both buffers
+        const size_t transfer_len = std::min(tx_data.size(), rx_data.size());
+        return transfer(tx_data.data(), rx_data.data(), transfer_len);
+    }
+};
+
+
 /***********************************************************************
  * Device interface
  **********************************************************************/
@@ -77,9 +133,7 @@ class SoapySX : public SoapySDR::Device
 private:
     double masterClock;
 
-    // SPIDEV file descriptor
-    int spi;
-
+    Spi spi;
     snd_pcm_t *alsa_rx;
     snd_pcm_t *alsa_tx;
 
@@ -88,29 +142,6 @@ private:
     // specific bits since they do not need to be read
     // from the chip every time.
     uint8_t regs[MAX_REGS];
-
-    // The transactSPI API in SoapySDR is a bit weird, using only
-    // a single unsigned int for the data.
-    // Here is a function that also allows longer transfers.
-    int spi_transfer(const uint8_t *tx_data, uint8_t *rx_data, const size_t numBytes)
-    const
-    {
-        if (spi < 0)
-            return -1;
-
-        struct spi_ioc_transfer transfer;
-        memset(&transfer, 0, sizeof(transfer));
-
-        transfer.tx_buf = (__u64)tx_data;
-        transfer.rx_buf = (__u64)rx_data;
-        transfer.len = (__u32)numBytes;
-        transfer.speed_hz = 10000000;
-
-        int ret = ioctl(spi, SPI_IOC_MESSAGE(1), &transfer);
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV ioctl: %d", ret);
-
-        return ret;
-    }
 
     // Set given bits of a register.
     // The registers are not actually written to the chip.
@@ -136,7 +167,7 @@ private:
         for (size_t i = 1; i < transfer_len; i++)
             buf[i] = regs[firstreg + i - 1];
 
-        spi_transfer(buf.data(), buf.data(), transfer_len);
+        spi.transfer(buf, buf);
     }
 
     void init_chip(void)
@@ -207,7 +238,8 @@ private:
 public:
     SoapySX(const SoapySDR::Kwargs &args):
         masterClock(32.0e6),
-        spi(-1),
+        // TODO: support custom SPIDEV path as an argument
+        spi("/dev/spidev0.0"),
         alsa_rx(NULL),
         alsa_tx(NULL),
         regs{0}
@@ -215,10 +247,6 @@ public:
         (void)args;
 
         SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapySX");
-
-        // TODO: support custom SPIDEV path as an argument
-        spi = open("/dev/spidev0.0", O_RDWR);
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "SPIDEV opened: %d", spi);
 
         init_chip();
         init_alsa();
@@ -233,9 +261,6 @@ public:
         // Put SX1255 to sleep
         set_register_bits(0, 0, 4, 0);
         write_registers_to_chip(0, 1);
-
-        if (spi >= 0)
-            close(spi);
     }
 
 /***********************************************************************
@@ -458,37 +483,6 @@ alsa_error:
  * Low level interfaces
  **********************************************************************/
 
-    // Wrap spi_transfer so that short raw SPI transfers
-    // are possible through the SoapySDR API.
-    unsigned transactSPI(const int addr, const unsigned data, const size_t numBits)
-    {
-        // Use address 0 for the radio chip. Other addresses are unused.
-        if (addr != 0) {
-            SoapySDR_logf(SOAPY_SDR_ERROR, "Invalid SPI address %d", addr);
-            throw std::runtime_error("Invalid SPI address");
-        }
-        // Only whole bytes are supported. The bits should also fit in unsigned.
-        if (((numBits % 8) != 0) || (numBits > 8*sizeof(unsigned))) {
-            SoapySDR_logf(SOAPY_SDR_ERROR, "Invalid SPI transfer length %d", numBits);
-            throw std::runtime_error("Invalid SPI address");
-        }
-        const size_t numBytes = numBits / 8;
-
-        uint8_t buf[sizeof(unsigned)];
-        // Put most significant bits first
-        for (size_t i = 0; i < numBytes; i++)
-            buf[i] = data >> (numBits - 8 * (i+1));
-
-        if (spi_transfer(buf, buf, numBytes) < 0)
-            throw std::runtime_error("SPI transfer failed");
-
-        // Pack the result to unsigned, MSB first
-        unsigned received = 0;
-        for (size_t i = 0; i < numBytes; i++)
-            received = (received << 8) | (unsigned)buf[i];
-        return received;
-    }
-
     std::vector<unsigned> readRegisters(
         const std::string & name,
         const unsigned addr,
@@ -505,10 +499,7 @@ alsa_error:
         for (size_t i = 1; i < transfer_len; i++)
             buf[i] = 0;
 
-        int ret = spi_transfer(buf.data(), buf.data(), transfer_len);
-
-        if ((size_t)ret != transfer_len)
-            throw std::runtime_error("SPI transfer failed");
+        spi.transfer(buf, buf);
 
         std::vector<unsigned> result(length, 0);
         for (size_t i = 0; i < length; i++)

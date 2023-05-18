@@ -12,10 +12,6 @@ def main():
         'driver': 'sx',
     })
 
-    # Test reading chip version number
-    # using the raw SPI transfer API.
-    print("%04x" % device.transactSPI(0, 0x0700, 16))
-
     def print_registers():
         """Test reading all registers, including possible undocumented ones
         with addresses above 0x13.
