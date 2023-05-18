@@ -155,6 +155,8 @@ private:
     Spi spi;
     snd_pcm_t *alsa_rx;
     snd_pcm_t *alsa_tx;
+    // If true, RX and TX streams have been linked using snd_pcm_link
+    bool linked;
 
     // Values of registers (to be) written to the chip.
     // Storing them here makes it easier and faster to change
@@ -232,7 +234,8 @@ private:
     alsa_error:
         if (pcm != NULL)
             snd_pcm_close(pcm);
-        return NULL;
+        // TODO more detailed error messages?
+        throw std::runtime_error("ALSA error");
     }
 
     void init_alsa(void)
@@ -261,6 +264,7 @@ public:
         spi("/dev/spidev0.0"),
         alsa_rx(NULL),
         alsa_tx(NULL),
+        linked(false),
         regs{0}
     {
         (void)args;
@@ -298,7 +302,23 @@ public:
         if (format != "CF32")
             throw std::runtime_error("Only CF32 format is currently supported");
         SoapySXStream *stream = new SoapySXStream(direction);
+
+        bool link = (args.count("link") > 0 && args.at("link") == "1");
+        if (link && (!linked)) {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Linking streams");
+            ALSACHECK(snd_pcm_link(alsa_rx, alsa_tx));
+        }
+        if ((!link) && linked) {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Unlinking streams");
+            ALSACHECK(snd_pcm_unlink(alsa_rx));
+            ALSACHECK(snd_pcm_unlink(alsa_tx));
+        }
+        linked = link;
+
         return reinterpret_cast<SoapySDR::Stream *>(stream);
+    alsa_error:
+        // TODO more detailed error messages?
+        throw std::runtime_error("ALSA error");
     }
 
     void closeStream(SoapySDR::Stream * handle)
@@ -321,7 +341,10 @@ public:
             ALSACHECK(snd_pcm_prepare(alsa_tx));
         } else {
             ALSACHECK(snd_pcm_prepare(alsa_rx));
-            ALSACHECK(snd_pcm_start(alsa_rx));
+            // If streams are linked, let the first write to TX stream
+            // also start the RX stream. Otherwise start it here.
+            if (!linked)
+                ALSACHECK(snd_pcm_start(alsa_rx));
         }
         return 0;
     alsa_error:
