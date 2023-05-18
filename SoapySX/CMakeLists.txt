@@ -18,7 +18,7 @@ set(CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE} CACHE STRING "")
 # These may be found within the build tree or in an external project.
 ########################################################################
 set(MY_DEVICE_INCLUDE_DIRS "")
-set(MY_DEVICE_LIBRARIES "asound")
+set(MY_DEVICE_LIBRARIES "asound" "gpiodcxx")
 
 ########################################################################
 # build the module

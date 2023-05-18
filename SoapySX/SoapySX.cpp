@@ -4,6 +4,8 @@
 
 #include <string.h>
 #include <cassert>
+#include <chrono>
+#include <thread>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -13,6 +15,7 @@
 
 #include <alsa/asoundlib.h>
 #include <alsa/control.h>
+#include <gpiod.hpp>
 
 // Clamp, offset, scale and quantize a value based on a SoapySDR::Range
 // and convert it to an integer.
@@ -144,6 +147,11 @@ public:
 };
 
 
+// GPIO pin numbers
+#define NUM_GPIO_RESET 5
+#define NUM_GPIO_TX 12
+#define NUM_GPIO_RX 13
+
 /***********************************************************************
  * Device interface
  **********************************************************************/
@@ -153,6 +161,8 @@ private:
     double masterClock;
 
     Spi spi;
+    gpiod::chip gpio;
+    gpiod::line gpio_reset, gpio_rx, gpio_tx;
     snd_pcm_t *alsa_rx;
     snd_pcm_t *alsa_tx;
     // If true, RX and TX streams have been linked using snd_pcm_link
@@ -189,6 +199,36 @@ private:
             buf[i] = regs[firstreg + i - 1];
 
         spi.transfer(buf, buf);
+    }
+
+    void init_gpio(void)
+    {
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "Requesting GPIO lines");
+        gpio_reset.request({
+            .consumer = "SX reset",
+            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
+            .flags = gpiod::line_request::FLAG_OPEN_SOURCE
+        }, 0);
+        gpio_rx.request({
+            .consumer = "SX RX",
+            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
+            .flags = 0
+        }, 1);
+        gpio_tx.request({
+            .consumer = "SX TX",
+            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
+            .flags = 0
+        }, 1);
+    }
+
+    void reset_chip(void)
+    {
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "Resetting chip");
+        // Timing from datasheet Figure 6-2: Manual Reset Timing Diagram
+        gpio_reset.set_value(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        gpio_reset.set_value(0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     void init_chip(void)
@@ -262,6 +302,10 @@ public:
         masterClock(32.0e6),
         // TODO: support custom SPIDEV path as an argument
         spi("/dev/spidev0.0"),
+        gpio("gpiochip0"),
+        gpio_reset(gpio.get_line(NUM_GPIO_RESET)),
+        gpio_rx(gpio.get_line(NUM_GPIO_RX)),
+        gpio_tx(gpio.get_line(NUM_GPIO_TX)),
         alsa_rx(NULL),
         alsa_tx(NULL),
         linked(false),
@@ -271,6 +315,8 @@ public:
 
         SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapySX");
 
+        init_gpio();
+        reset_chip();
         init_chip();
         init_alsa();
     }
