@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Simple test for the linked streams feature."""
 
+import time
 
 import SoapySDR
 import numpy as np
@@ -26,16 +27,24 @@ def main():
     device.activateStream(rx)
     device.activateStream(tx)
 
-    buf = np.zeros(2000)
+    buf = np.zeros(64, dtype=np.complex64)
+    initial_buf = np.zeros(256, dtype=np.complex64)
     # Fill up the TX buffer first.
     # First write to the TX buffer should start both the TX and RX streams
     # when they are linked together.
-    for _ in range(5):
-        device.writeStream(tx, [buf], len(buf))
+    device.writeStream(tx, [initial_buf], len(initial_buf))
     # Then keep reading and writing the same number of samples
     for _ in range(10):
-        device.readStream(rx, [buf], len(buf))
-        device.writeStream(tx, [buf], len(buf))
+        t1 = time.time()
+        r = device.readStream(rx, [buf], len(buf))
+        t2 = time.time()
+        print("T:", t2-t1)
+        print(r)
+        if r.ret < 0:
+            break
+        r = device.writeStream(tx, [buf], len(buf))
+        if r.ret < 0:
+            break
 
     device.deactivateStream(rx)
     device.deactivateStream(tx)

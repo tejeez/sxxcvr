@@ -252,7 +252,9 @@ private:
         snd_pcm_t *pcm = NULL;
         snd_pcm_hw_params_t *hwp;
 
-        unsigned hwp_periods = 0;
+        unsigned int hwp_periods = 0;
+        // Period sizes smaller than 64 did not seem to work well.
+        snd_pcm_uframes_t hwp_period_size = 64;
         snd_pcm_uframes_t hwp_buffer_size = 0;
 
         ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
@@ -264,12 +266,13 @@ private:
         // so just use a fixed "dummy" value.
         ALSACHECK(snd_pcm_hw_params_set_rate(pcm, hwp, 192000, 0));
         ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
-        ALSACHECK(snd_pcm_hw_params_set_periods_first(pcm, hwp, &hwp_periods, 0));
         ALSACHECK(snd_pcm_hw_params_set_buffer_size_last(pcm, hwp, &hwp_buffer_size));
+        ALSACHECK(snd_pcm_hw_params_set_period_size_near(pcm, hwp, &hwp_period_size, 0));
+        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, &hwp_periods, 0));
 
         ALSACHECK(snd_pcm_hw_params(pcm, hwp));
 
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: periods=%u, buffer_size=%d", hwp_periods, hwp_buffer_size);
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: buffer_size=%d, period_size=%d, periods=%d", hwp_buffer_size, hwp_period_size, hwp_periods);
         return pcm;
     alsa_error:
         if (pcm != NULL)
@@ -386,11 +389,14 @@ public:
         if (stream->is_tx()) {
             ALSACHECK(snd_pcm_prepare(alsa_tx));
         } else {
-            ALSACHECK(snd_pcm_prepare(alsa_rx));
-            // If streams are linked, let the first write to TX stream
-            // also start the RX stream. Otherwise start it here.
-            if (!linked)
+            if (!linked) {
+                // If streams are linked, preparing TX stream
+                // also prepares the RX stream.
+                ALSACHECK(snd_pcm_prepare(alsa_rx));
+                // If streams are linked, let the first write to TX stream
+                // also start the RX stream. Otherwise start it here.
                 ALSACHECK(snd_pcm_start(alsa_rx));
+            }
         }
         return 0;
     alsa_error:
