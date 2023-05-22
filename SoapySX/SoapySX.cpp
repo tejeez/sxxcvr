@@ -165,6 +165,10 @@ private:
     gpiod::line gpio_reset, gpio_rx, gpio_tx;
     snd_pcm_t *alsa_rx;
     snd_pcm_t *alsa_tx;
+
+    // Transmitter is turned on when squared magnitude of a TX sample
+    // exceeds this threshold.
+    float tx_threshold2;
     // If true, RX and TX streams have been linked using snd_pcm_link
     bool linked;
 
@@ -311,6 +315,7 @@ public:
         gpio_tx(gpio.get_line(NUM_GPIO_TX)),
         alsa_rx(NULL),
         alsa_tx(NULL),
+        tx_threshold2(0.0f),
         linked(false),
         regs{0}
     {
@@ -350,7 +355,18 @@ public:
         (void)args; // Unused for now
         if (format != "CF32")
             throw std::runtime_error("Only CF32 format is currently supported");
+        // TODO: delete this also if an exception happens later in this function.
         SoapySXStream *stream = new SoapySXStream(direction);
+
+        if (stream->is_tx()) {
+            const float tx_threshold_default = 1.0e-3;
+            // Enable TX when magnitude of a sample exceeds a given threshold.
+            float tx_threshold =
+                (args.count("threshold") > 0)
+                ? std::stof(args.at("threshold"))
+                : tx_threshold_default;
+            tx_threshold2 = tx_threshold * tx_threshold;
+        }
 
         bool link = (args.count("link") > 0 && args.at("link") == "1");
         if (link && (!linked)) {
@@ -489,16 +505,16 @@ public:
         const float scaling = (float)0x7FFFFFFFL;
         for (size_t i = 0; i < numElems*2; i+=2)
         {
-            int32_t vi = scaling * std::max(std::min(input[i  ], 1.0f), -1.0f);
-            int32_t vq = scaling * std::max(std::min(input[i+1], 1.0f), -1.0f);
+            float fi = input[i], fq = input[i+1];
+            int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
+            int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
             // Second lowest bit of each "I" sample controls RX/TX switching.
             // Set the lowest bit to the same value just in case.
             // Let's also reserve the 2 lowest bits of "Q" samples
             // for future extensions and keep them as 0.
-            bool tx_on = true;
             vi &= 0xFFFFFFFCL;
             vq &= 0xFFFFFFFCL;
-            if (tx_on)
+            if (fi*fi + fq*fq >= tx_threshold2)
                 vi |= 0b11L;
             raw[i  ] = vi;
             raw[i+1] = vq;
