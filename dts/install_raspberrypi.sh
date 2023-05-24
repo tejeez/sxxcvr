@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 set -e
 
 DTBO_PATH=/boot/overlays/sx1255.dtbo

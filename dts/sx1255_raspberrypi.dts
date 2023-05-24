@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+//
 // Device tree overlay to enable I2S on Raspberry Pi.
 //
 // SX1255 is configured from userspace through SPIDEV,

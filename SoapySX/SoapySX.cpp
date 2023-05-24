@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include <SoapySDR/Device.hpp>
 #include <SoapySDR/Registry.hpp>
 #include <SoapySDR/Logger.hpp>
