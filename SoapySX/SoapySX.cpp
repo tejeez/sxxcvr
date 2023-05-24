@@ -31,7 +31,6 @@ static int32_t scale_from_range(SoapySDR::Range range, double value)
 }
 
 // Inverse of scale_from_range.
-[[maybe_unused]]
 static double scale_to_range(SoapySDR::Range range, int32_t value)
 {
     return std::min(std::max(
@@ -63,7 +62,8 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
     // 0x0C: RX gains, default value from datasheet
     0b00111111,
     // 0x0D: RX filters, make them narrow
-    0b00110111,
+    // ADCTRIM value of 7 minimized ADC spurs
+    0b00111111,
     // 0x0E: default value from datasheet
     0b00000110,
     // 0x0F: IO_MAP, default value from datasheet
@@ -188,6 +188,16 @@ private:
             throw std::runtime_error("Invalid register address");
         unsigned mask = ((1 << nbits) - 1) << lowestbit;
         regs[address] = (regs[address] & (~mask)) | ((value << lowestbit) & mask);
+    }
+
+    // Get given bits of a cached register.
+    // The registers are not actually read from the chip.
+    unsigned get_cached_register_bits(size_t address, unsigned lowestbit, unsigned nbits) const
+    {
+        if (address >= MAX_REGS)
+            throw std::runtime_error("Invalid register address");
+        unsigned mask = ((1 << nbits) - 1) << lowestbit;
+        return (regs[address] & mask) >> lowestbit;
     }
 
     // Write a range of registers to the chip.
@@ -639,7 +649,7 @@ public:
     {
         (void)channel;
         if (direction == SOAPY_SDR_RX)
-            return std::vector<std::string>{"ZIN", "LNA", "PGA", "ADCTRIM"};
+            return std::vector<std::string>{"LNA", "PGA"};
         else
             return std::vector<std::string>{"DAC", "MIXER"};
     }
@@ -651,15 +661,17 @@ public:
     ) const
     {
         (void)channel;
-        std::map<std::pair<const int, const std::string>, const SoapySDR::Range> gainRanges = {
-            {{SOAPY_SDR_RX, "ZIN"}, {50, 200, 150}}, // not really a gain setting
-            {{SOAPY_SDR_RX, "LNA"}, {-48, 0, 6}},
-            {{SOAPY_SDR_RX, "PGA"}, {0, 30, 2}},
-            {{SOAPY_SDR_RX, "ADCTRIM"}, {0, 7, 1}}, // not a gain setting
-            {{SOAPY_SDR_TX, "DAC"}, {-9, 0, 3}},
-            {{SOAPY_SDR_TX, "MIXER"}, {-37.5, -7.5, 2}},
-        };
-        return gainRanges.at(std::pair<const int, const std::string>(direction, name));
+        if (direction == SOAPY_SDR_RX) {
+            // It's hard to decide which reference point to use for LNA gain values.
+            // This was chosen so that the most useful values of total gain
+            // are around 0-50 dB, somewhat similar to some other SDRs.
+            if (name == "LNA")   return {-12.0 , 36.0 , 6.0 };
+            if (name == "PGA")   return {  0.0 , 30.0 , 2.0 };
+        } else {
+            if (name == "DAC")   return {  0.0 ,  9.0 , 3.0 };
+            if (name == "MIXER") return {-37.5 , -7.5 , 2.0 };
+        }
+        return {0, 0, 0};
     }
 
     void setGain(
@@ -671,9 +683,7 @@ public:
     {
         int32_t quantized = scale_from_range(getGainRange(direction, channel, name), value);
         if (direction == SOAPY_SDR_RX) {
-            if (name == "ZIN") {
-                set_register_bits(0x0C, 0, 1, quantized);
-            } else if (name == "LNA") {
+            if (name == "LNA") {
                 // LNA gain does not have a constant step,
                 // so some extra logic is needed.
                 if (quantized <= 6) // -48 to -12 dB
@@ -684,15 +694,9 @@ public:
                     set_register_bits(0x0C, 5, 3, 1);
             } else if (name == "PGA") {
                 set_register_bits(0x0C, 1, 4, quantized);
-            } else if (name == "ADCTRIM") {
-                // This is not a gain setting but making it appear as one
-                // is the easiest way to test how it affects reception.
-                set_register_bits(0x0D, 2, 3, quantized);
             }
             SoapySDR_logf(SOAPY_SDR_DEBUG, "RXFE1=0x%02x", regs[0x0C]);
-            // Write 2 registers for the ADCTRIM setting.
-            // Can be changed back to 1 if ADCTRIM is removed from gains.
-            write_registers_to_chip(0x0C, 2);
+            write_registers_to_chip(0x0C, 1);
         } else {
             if (name == "DAC") {
                 set_register_bits(0x08, 4, 3, 3-quantized);
@@ -702,6 +706,80 @@ public:
             SoapySDR_logf(SOAPY_SDR_DEBUG, "TXFE1=0x%02x", regs[0x08]);
             write_registers_to_chip(0x08, 1);
         }
+    }
+
+    double getGain(
+        const int direction,
+        const size_t channel,
+        const std::string & name
+    ) const
+    {
+        int32_t quantized = 0;
+        if (direction == SOAPY_SDR_RX) {
+            if (name == "LNA") {
+                const int32_t map[8] = {0, 8, 7, 6, 4, 2, 0, 0};
+                quantized = map[get_cached_register_bits(0x0C, 5, 3)];
+            } else if (name == "PGA") {
+                quantized = get_cached_register_bits(0x0C, 1, 4);
+            }
+        } else {
+            if (name == "DAC") {
+                quantized = 3 - get_cached_register_bits(0x08, 4, 3);
+            } else if (name == "MIXER") {
+                quantized = get_cached_register_bits(0x08, 0, 4);
+            }
+        }
+        return scale_to_range(getGainRange(direction, channel, name), quantized);
+    }
+
+    void setGain(
+        const int direction,
+        const size_t channel,
+        const double value
+    )
+    {
+        if (direction == SOAPY_SDR_RX) {
+            // Keep PGA gain around pga_gain_target over most of the
+            // gain range while adjusting LNA gain over a wide range.
+            // PGA gain has a smaller step, so use it to fine tune gain.
+            const double pga_gain_target = 12.0;
+            setGain(direction, channel, "LNA", value - pga_gain_target);
+            double lna_gain = getGain(direction, channel, "LNA");
+            setGain(direction, channel, "PGA", value - lna_gain);
+        } else {
+            // Not sure about best TX gain distribution yet.
+            // Use similar logic as RX gains for now.
+            const double mixer_gain_target = -12.0;
+            setGain(direction, channel, "DAC", value - mixer_gain_target);
+            double dac_gain = getGain(direction, channel, "DAC");
+            setGain(direction, channel, "MIXER", value - dac_gain);
+        }
+    }
+
+    double getGain(const int dir, const size_t channel) const
+    {
+        // Almost the same as the default method, but without
+        // normalizing gains with their minimum value.
+        // I am not sure if this is a good idea, since I do not
+        // really know the reasoning behind the default method.
+        double gain = 0.0;
+        for (const auto &name : this->listGains(dir, channel))
+        {
+            gain += this->getGain(dir, channel, name);
+        }
+        return gain;
+    }
+
+    SoapySDR::Range getGainRange(const int dir, const size_t channel) const
+    {
+        double gain_min = 0.0, gain_max = 0.0;
+        for (const auto &name : this->listGains(dir, channel))
+        {
+            const auto r = this->getGainRange(dir, channel, name);
+            gain_min += r.minimum();
+            gain_max += r.maximum();
+        }
+        return SoapySDR::Range(gain_min, gain_max);
     }
 
 /***********************************************************************
