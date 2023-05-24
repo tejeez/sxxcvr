@@ -43,4 +43,6 @@ This behavior closely reflects that of the underlying ALSA API and its
 [snd_pcm_link feature](https://www.alsa-project.org/alsa-doc/alsa-lib/pcm.html#pcm_sync).
 See the
 [test_linked_streams](SoapySX/test_linked_streams.py)
-script for a simple example on using this feature.
+script or the
+[linear repeater example](example/linear_repeater.py)
+for examples on using this feature.
