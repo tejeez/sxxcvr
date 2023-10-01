@@ -266,12 +266,17 @@ private:
     static snd_pcm_t *init_alsa_dir(const char *name, snd_pcm_stream_t dir)
     {
         snd_pcm_t *pcm = NULL;
-        snd_pcm_hw_params_t *hwp;
+        snd_pcm_hw_params_t *hwp = NULL;
 
         unsigned int hwp_periods = 0;
-        // Period sizes smaller than 64 did not seem to work well.
-        snd_pcm_uframes_t hwp_period_size = 64;
-        snd_pcm_uframes_t hwp_buffer_size = 0;
+        // Period sizes smaller than 64 did not seem to work well
+        // in some tests. A higher period size somewhat reduces
+        // CPU use at the cost of increased minimum latency.
+        // Period and buffer sizes could be made configurable
+        // as a stream argument to let applications make
+        // a tradeoff between latency and CPU usage.
+        snd_pcm_uframes_t hwp_period_size = 256;
+        snd_pcm_uframes_t hwp_buffer_size = 8192;
 
         ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
         ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
@@ -282,17 +287,20 @@ private:
         // so just use a fixed "dummy" value.
         ALSACHECK(snd_pcm_hw_params_set_rate(pcm, hwp, 192000, 0));
         ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
-        ALSACHECK(snd_pcm_hw_params_set_buffer_size_last(pcm, hwp, &hwp_buffer_size));
+        ALSACHECK(snd_pcm_hw_params_set_buffer_size_near(pcm, hwp, &hwp_buffer_size));
         ALSACHECK(snd_pcm_hw_params_set_period_size_near(pcm, hwp, &hwp_period_size, 0));
         ALSACHECK(snd_pcm_hw_params_get_periods(hwp, &hwp_periods, 0));
 
         ALSACHECK(snd_pcm_hw_params(pcm, hwp));
+        snd_pcm_hw_params_free(hwp);
 
         SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: buffer_size=%d, period_size=%d, periods=%d", hwp_buffer_size, hwp_period_size, hwp_periods);
         return pcm;
     alsa_error:
         if (pcm != NULL)
             snd_pcm_close(pcm);
+        if (hwp != NULL)
+            snd_pcm_hw_params_free(hwp);
         // TODO more detailed error messages?
         throw std::runtime_error("ALSA error");
     }
