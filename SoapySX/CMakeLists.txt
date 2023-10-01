@@ -6,6 +6,11 @@ cmake_minimum_required(VERSION 2.6)
 project(SoapySX CXX)
 enable_testing()
 
+option(HARDWARE_V1_0 "Use pinout of prototype v1.0" OFF)
+if (HARDWARE_V1_0)
+    add_definitions(-DHARDWARE_V1_0=1)
+endif (HARDWARE_V1_0)
+
 #select the release build type by default to get optimization flags
 if(NOT CMAKE_BUILD_TYPE)
    set(CMAKE_BUILD_TYPE "Release")

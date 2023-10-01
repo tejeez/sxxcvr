@@ -22,6 +22,8 @@ Compile and install SoapySDR module:
 cd SoapySX
 mkdir build
 cd build
+# If you have SXXCVR prototype v1.0, do: cmake .. -DHARDWARE_V1_0=1
+# Otherwise:
 cmake ..
 make -j4
 sudo make install

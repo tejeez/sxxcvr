@@ -151,8 +151,13 @@ public:
 
 // GPIO pin numbers
 #define NUM_GPIO_RESET 5
+#if HARDWARE_V1_0
 #define NUM_GPIO_TX 12
 #define NUM_GPIO_RX 13
+#else
+#define NUM_GPIO_TX 22
+#define NUM_GPIO_RX 23
+#endif
 
 /***********************************************************************
  * Device interface
