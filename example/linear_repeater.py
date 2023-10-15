@@ -38,7 +38,7 @@ def init_sdr():
 
 class FullDuplexIo:
     """Full duplex signal I/O using SoapySDR."""
-    def __init__(self, device, rx_stream, tx_stream, buffer_samples = 256, latency_samples = 512):
+    def __init__(self, device, rx_stream, tx_stream, buffer_samples = 256, latency_samples = 256*3):
         self.streams_running = False
         self.buf = np.zeros(buffer_samples, dtype=np.complex64)
         self.tx_start_buf = np.zeros(latency_samples, dtype=np.complex64)
