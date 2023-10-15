@@ -166,6 +166,7 @@ class SoapySX : public SoapySDR::Device
 {
 private:
     double masterClock;
+    double sampleRate;
 
     Spi spi;
     gpiod::chip gpio;
@@ -332,6 +333,7 @@ private:
 public:
     SoapySX(const SoapySDR::Kwargs &args):
         masterClock(32.0e6),
+        sampleRate(125.0e3),
         // TODO: support custom SPIDEV path as an argument
         spi("/dev/spidev0.0"),
         gpio("gpiochip0"),
@@ -568,7 +570,10 @@ public:
     std::vector<double> listSampleRates(const int direction, const size_t channel) const
     {
         (void)direction; (void)channel;
-        std::vector<double> sampleRates{125000.0};
+        std::vector<double> sampleRates;
+        for (unsigned divider = 512; divider >= 64; divider /= 2) {
+            sampleRates.push_back(masterClock / (double)divider);
+        }
         return sampleRates;
     }
 
@@ -590,7 +595,35 @@ public:
     )
     {
         // TODO (fixed sample rate for now)
-        (void)direction; (void)channel; (void)rate;
+        (void)direction; (void)channel;
+        if (rate != rate || rate <= 0)
+            throw std::runtime_error("Sample rate must be positive");
+        double divider = masterClock / rate;
+        if (divider == 64.0) {
+            // Bit clock divided by 1
+            set_register_bits(0x12, 0, 4, 0);
+            // Decimate by 8 * 3**0 * 2**3 = 64
+            set_register_bits(0x13, 3, 5, 3);
+        } else if (divider == 128.0) {
+            // Bit clock divided by 2
+            set_register_bits(0x12, 0, 4, 1);
+            // Decimate by 8 * 3**0 * 2**4 = 128
+            set_register_bits(0x13, 3, 5, 4);
+        } else if (divider == 256.0) {
+            // Bit clock divided by 4
+            set_register_bits(0x12, 0, 4, 2);
+            // Decimate by 8 * 3**0 * 2**5 = 256
+            set_register_bits(0x13, 3, 5, 5);
+        } else if (divider == 512.0) {
+            // Bit clock divided by 8
+            set_register_bits(0x12, 0, 4, 3);
+            // Decimate by 8 * 3**0 * 2**6 = 512
+            set_register_bits(0x13, 3, 5, 6);
+        } else {
+            throw std::runtime_error("Unsupported sample rate");
+        }
+        write_registers_to_chip(0x12, 2);
+        sampleRate = rate;
     }
 
     double getSampleRate(
@@ -599,8 +632,7 @@ public:
     ) const
     {
         (void)direction; (void)channel;
-        // Fixed sample rate for now
-        return 125000.0;
+        return sampleRate;
     }
 
 /***********************************************************************
