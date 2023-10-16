@@ -77,6 +77,38 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
 };
 
 
+// Register values for a given sample rate
+struct sampleRateRegs {
+    // Ratio of reference clock to sample rate
+    uint16_t div;
+    // iism_clk_div value (register 0x12 bits 3-0)
+    uint8_t clkout : 4;
+    // int_dec_mantisse value (register 0x13 bit 7)
+    uint8_t mant : 1;
+    // int_dec_m_parameter value (register 0x13 bit 6)
+    uint8_t m : 1;
+    // int_dec_n_parameter value (register 0x13 bits 5-3)
+    uint8_t n : 3;
+};
+
+#define N_SAMPLE_RATES 6
+
+// Register values for different sample rates
+static const struct sampleRateRegs sample_rates[N_SAMPLE_RATES] = {
+    {1536, 0b0110, 0, 1, 6 },
+    { 768, 0b0100, 0, 1, 5 },
+    { 512, 0b0011, 0, 0, 6 },
+    //{ 384, 0b0011, 0, 1, 4 }, // 24 bit samples (did not work correctly)
+    { 256, 0b0010, 0, 0, 5 },
+    //{ 192, 0b0010, 0, 1, 3 }, // 24 bit samples (did not work correctly)
+    { 128, 0b0001, 0, 0, 4 },
+    //{  96, 0b0001, 0, 1, 2 }, // 24 bit samples (did not work correctly)
+    {  64, 0b0000, 0, 0, 3 },
+    //{  48, 0b0000, 0, 1, 1 }, // 24 bit samples (did not work correctly)
+    //{  32, 0b0000, 0, 0, 2 }, // 16 bit samples (did not work)
+};
+
+
 // Class to use SPI through the SPI userspace API (SPIDEV) in Linux.
 // Putting it in a separate class helps use RAII to ensure
 // the file descriptor gets closed in all situations.
@@ -571,8 +603,8 @@ public:
     {
         (void)direction; (void)channel;
         std::vector<double> sampleRates;
-        for (unsigned divider = 512; divider >= 64; divider /= 2) {
-            sampleRates.push_back(masterClock / (double)divider);
+        for (size_t i = 0; i < N_SAMPLE_RATES; i++) {
+            sampleRates.push_back(masterClock / (double)sample_rates[i].div);
         }
         return sampleRates;
     }
@@ -598,32 +630,26 @@ public:
         (void)direction; (void)channel;
         if (rate != rate || rate <= 0)
             throw std::runtime_error("Sample rate must be positive");
-        double divider = masterClock / rate;
-        if (divider == 64.0) {
-            // Bit clock divided by 1
-            set_register_bits(0x12, 0, 4, 0);
-            // Decimate by 8 * 3**0 * 2**3 = 64
-            set_register_bits(0x13, 3, 5, 3);
-        } else if (divider == 128.0) {
-            // Bit clock divided by 2
-            set_register_bits(0x12, 0, 4, 1);
-            // Decimate by 8 * 3**0 * 2**4 = 128
-            set_register_bits(0x13, 3, 5, 4);
-        } else if (divider == 256.0) {
-            // Bit clock divided by 4
-            set_register_bits(0x12, 0, 4, 2);
-            // Decimate by 8 * 3**0 * 2**5 = 256
-            set_register_bits(0x13, 3, 5, 5);
-        } else if (divider == 512.0) {
-            // Bit clock divided by 8
-            set_register_bits(0x12, 0, 4, 3);
-            // Decimate by 8 * 3**0 * 2**6 = 512
-            set_register_bits(0x13, 3, 5, 6);
-        } else {
+
+        double divider = round(masterClock / rate);
+        struct sampleRateRegs r;
+        bool found = false;
+        for (size_t i = 0; i < N_SAMPLE_RATES; i++) {
+            r = sample_rates[i];
+            if ((double)r.div == divider) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
             throw std::runtime_error("Unsupported sample rate");
         }
+        set_register_bits(0x12, 0, 4, r.clkout);
+        set_register_bits(0x13, 7, 1, r.mant);
+        set_register_bits(0x13, 6, 1, r.m);
+        set_register_bits(0x13, 3, 3, r.n);
         write_registers_to_chip(0x12, 2);
-        sampleRate = rate;
+        sampleRate = masterClock / divider;
     }
 
     double getSampleRate(
