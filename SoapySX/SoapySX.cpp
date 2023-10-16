@@ -854,6 +854,74 @@ public:
     }
 
 /***********************************************************************
+ * Antennas
+ **********************************************************************/
+
+    std::vector<std::string> listAntennas(const int direction, const size_t channel) const
+    {
+        (void)channel; // Only one channel
+        std::vector<std::string> antennas;
+        if (direction == SOAPY_SDR_RX) {
+            antennas.push_back("RX");
+            antennas.push_back("LB");
+            // Digital loopback did not seem to work, so do not list it
+            //antennas.push_back("DLB");
+        } else {
+            antennas.push_back("TX");
+            antennas.push_back("NONE");
+        }
+        return antennas;
+    }
+
+    void setAntenna(const int direction, const size_t channel, const std::string &name)
+    {
+        (void)channel;
+        if (direction == SOAPY_SDR_RX) {
+            if (name == "RX") {
+                // Disable loopback
+                set_register_bits(0x10, 2, 2, 0);
+            } else if (name == "LB") {
+                // RF loopback
+                set_register_bits(0x10, 2, 2, 1);
+            } else if (name == "DLB") {
+                // Digital loopback
+                set_register_bits(0x10, 2, 2, 3);
+            }
+            write_registers_to_chip(0x10, 1);
+        } else {
+            if (name == "TX") {
+                // Enable PA
+                set_register_bits(0x00, 3, 1, 1);
+            } else if (name == "NONE") {
+                // Disable PA
+                set_register_bits(0x00, 3, 1, 0);
+            }
+            write_registers_to_chip(0x00, 1);
+        }
+    }
+
+    std::string getAntenna(const int direction, const size_t channel) const
+    {
+        (void)channel;
+        if (direction == SOAPY_SDR_RX) {
+            unsigned lb = get_cached_register_bits(0x10, 2, 2);
+            if (lb & 2)
+                return "DLB";
+            if (lb & 1)
+                return "LB";
+            return "RX";
+        } else {
+            if (get_cached_register_bits(0x00, 3, 1)) {
+                // PA is enabled
+                return "TX";
+            } else {
+                // PA is disabled
+                return "NONE";
+            }
+        }
+    }
+
+/***********************************************************************
  * Low level interfaces
  **********************************************************************/
 
@@ -920,17 +988,6 @@ public:
     {
         (void)direction; // Same for both directions
         return 1;
-    }
-
-    std::vector<std::string> listAntennas(const int direction, const size_t channel) const
-    {
-        (void)channel; // Only one channel
-        std::vector<std::string> antennas;
-        if (direction == SOAPY_SDR_RX)
-            antennas.push_back("RX");
-        else
-            antennas.push_back("TX");
-        return antennas;
     }
 };
 
