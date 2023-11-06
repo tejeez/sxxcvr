@@ -63,7 +63,8 @@ static const uint8_t init_registers[N_INIT_REGISTERS] = {
     0b00111111,
     // 0x0D: RX filters, make them narrow
     // ADCTRIM value of 7 minimized ADC spurs
-    0b00111111,
+    // but maybe 6 worked better with 38.4 MHz clock in some cases.
+    0b00111011,
     // 0x0E: default value from datasheet
     0b00000110,
     // 0x0F: IO_MAP, default value from datasheet
@@ -358,6 +359,43 @@ private:
             snd_pcm_close(alsa_tx);
     }
 
+    bool does_synth_tune(double frequency)
+    {
+        setFrequency(SOAPY_SDR_RX, 0, frequency, {});
+        setFrequency(SOAPY_SDR_TX, 0, frequency, {});
+        // Give some time for PLL to lock
+        usleep(1000);
+        auto status_register = readRegister("", 0x11);
+        return (status_register & 3) == 3;
+    }
+
+    void detect_clock(void)
+    {
+        // Try to detect whether SX1255 clock is 32 MHz or 38.4 MHz
+        // by tuning near edges of tuning range.
+        // First assume it is 32 MHz and try tuning accordingly.
+        masterClock = 32.0e6;
+        // If clock is 38.4 MHz instead, 510 MHz ends up at 612 MHz
+        // where synthesizers (hopefully) do not lock anymore.
+        bool tunes_high = does_synth_tune(510e6);
+        // Synthesizers do not (hopefully) go down to 330 MHz, but
+        // if clock is 38.4 MHz instead, they end up at 396 MHz.
+        bool tunes_low  = does_synth_tune(330e6);
+        if (tunes_low && (!tunes_high)) {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Detected clock as 38.4 MHz");
+            masterClock = 38.4e6;
+        } else if (tunes_high && (!tunes_low)) {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Detected clock as 32.0 MHz");
+        } else {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Clock detection failed, assuming 32.0 MHz");
+        }
+
+        // Update default values for new masterClock value
+        sampleRate = masterClock / 256.0;
+        setFrequency(SOAPY_SDR_RX, 0, 433.92e6, {});
+        setFrequency(SOAPY_SDR_TX, 0, 433.92e6, {});
+    }
+
 /***********************************************************************
  * Initialization and destruction
  **********************************************************************/
@@ -385,6 +423,7 @@ public:
         init_gpio();
         reset_chip();
         init_chip();
+        detect_clock();
         init_alsa();
     }
 
@@ -950,6 +989,15 @@ public:
         return result;
     }
 
+    unsigned readRegister(
+        const std::string & name,
+        const unsigned addr
+    ) const
+    {
+        auto r = readRegisters(name, addr, 1);
+        return r.at(0);
+    }
+
     void writeRegisters(
         const std::string & name,
         const unsigned addr,
@@ -962,6 +1010,17 @@ public:
             set_register_bits(addr + i, 0, 8, value[i]);
 
         write_registers_to_chip(addr, value.size());
+    }
+
+    void writeRegister(
+        const std::string & name,
+        const unsigned addr,
+        const unsigned value
+    )
+    {
+        (void)name;
+        set_register_bits(addr, 0, 8, value);
+        write_registers_to_chip(addr, 1);
     }
 
 /***********************************************************************
