@@ -77,6 +77,12 @@
 				};
 			};
 		};
+	};
 
+	fragment@4 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+		};
 	};
 };

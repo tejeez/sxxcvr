@@ -2,20 +2,12 @@
 
 Install dependencies:
 ```
-sudo apt-get install --no-install-recommends git device-tree-compiler alsa-utils make g++ cmake libsoapysdr-dev libasound2-dev libgpiod-dev soapysdr-tools python3-soapysdr
+sudo apt-get install --no-install-recommends git make g++ cmake libsoapysdr-dev libasound2-dev libgpiod-dev soapysdr-tools python3-soapysdr
 ```
 
-Install device tree blob:
-```
-cd dts
-./install_raspberrypi.sh
-```
-
-Reboot the machine and check that the audio device is found:
-```
-aplay -L|grep SX1255
-arecord -L|grep SX1255
-```
+Some prototype boards do not have the HAT identification EEPROM written.
+If you have one of those, write it first by following
+[EEPROM writing instructions](dts/README.md).
 
 Compile and install SoapySDR module:
 ```
