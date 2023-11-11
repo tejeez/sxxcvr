@@ -7,6 +7,7 @@
 #include <string.h>
 #include <cassert>
 #include <chrono>
+#include <fstream>
 #include <thread>
 
 #include <fcntl.h>
@@ -36,6 +37,33 @@ static double scale_to_range(SoapySDR::Range range, int32_t value)
     return std::min(std::max(
         range.minimum() + range.step() * (double)value,
         range.minimum()), range.maximum());
+}
+
+// Read a number from a file in format 0x1234.
+static uint16_t read_hex_file(const char *filename)
+{
+    std::ifstream file(filename);
+    std::string str;
+    std::getline(file, str);
+    return std::stoul(str, NULL, 16);
+}
+
+static uint16_t get_hardware_version(void)
+{
+    const uint16_t product_id_expected = 0x1255;
+    // Default assumption if ID cannot be read
+    uint16_t product_id = product_id_expected, product_ver = 0x0101;
+    try {
+        product_id  = read_hex_file("/proc/device-tree/hat/product_id");
+        product_ver = read_hex_file("/proc/device-tree/hat/product_ver");
+        SoapySDR_logf(SOAPY_SDR_INFO, "Hardware version %d.%d", product_ver >> 8, product_ver & 0xFF);
+    } catch(std::exception &e) {
+        SoapySDR_logf(SOAPY_SDR_WARNING, "Could not read HAT ID. Assuming hardware version %d.%d", product_ver >> 8, product_ver & 0xFF);
+    }
+    if (product_id != product_id_expected) {
+        SoapySDR_logf(SOAPY_SDR_WARNING, "Unexpected product ID 0x%04x. Are you sure the correct HAT is connected?", product_id);
+    }
+    return product_ver;
 }
 
 #define MAX_REGS 0x80
@@ -181,16 +209,6 @@ public:
     }
 };
 
-
-// GPIO pin numbers
-#define NUM_GPIO_RESET 5
-#if HARDWARE_V1_0
-#define NUM_GPIO_TX 12
-#define NUM_GPIO_RX 13
-#else
-#define NUM_GPIO_TX 22
-#define NUM_GPIO_RX 23
-#endif
 
 /***********************************************************************
  * Device interface
@@ -401,15 +419,15 @@ private:
  **********************************************************************/
 
 public:
-    SoapySX(const SoapySDR::Kwargs &args):
+    SoapySX(const SoapySDR::Kwargs &args, uint16_t hwversion):
         masterClock(32.0e6),
         sampleRate(125.0e3),
         // TODO: support custom SPIDEV path as an argument
         spi("/dev/spidev0.0"),
         gpio("gpiochip0"),
-        gpio_reset(gpio.get_line(NUM_GPIO_RESET)),
-        gpio_rx(gpio.get_line(NUM_GPIO_RX)),
-        gpio_tx(gpio.get_line(NUM_GPIO_TX)),
+        gpio_reset(gpio.get_line(5)),
+        gpio_rx(gpio.get_line(hwversion == 0x0100 ? 13 : 23)),
+        gpio_tx(gpio.get_line(hwversion == 0x0100 ? 12 : 22)),
         alsa_rx(NULL),
         alsa_tx(NULL),
         tx_threshold2(0.0f),
@@ -1073,7 +1091,7 @@ static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
  **********************************************************************/
 static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args)
 {
-    return new SoapySX(args);
+    return new SoapySX(args, get_hardware_version());
 }
 
 /***********************************************************************
