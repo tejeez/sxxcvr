@@ -36,3 +36,12 @@ SOAPY_SDR_MODULE_UTIL(
     SOURCES SoapySX.cpp
     LIBRARIES ${MY_DEVICE_LIBRARIES}
 )
+
+########################################################################
+# Other files to install
+########################################################################
+
+option(INSTALL_PIPEWIRE_CONF "Install PipeWire configuration to prevent it from trying to use SX1255 as a normal sound card" ON)
+if (INSTALL_PIPEWIRE_CONF)
+install(FILES 60-pipewire-do-not-use-i2s.lua DESTINATION /usr/share/wireplumber/main.lua.d/)
+endif (INSTALL_PIPEWIRE_CONF)
