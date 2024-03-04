@@ -38,7 +38,7 @@ def main(
     dev = SoapySDR.Device({
         'driver': 'sx',
     })
-    dev.setSampleRate(SoapySDR.SOAPY_SDR_TX, 0, 125000.0)
+    dev.setSampleRate(SoapySDR.SOAPY_SDR_TX, 0, 75000.0)
     dev.setFrequency(SoapySDR.SOAPY_SDR_TX, 0, tx_freq)
     dev.setGain(SoapySDR.SOAPY_SDR_TX, 0, tx_gain)
 

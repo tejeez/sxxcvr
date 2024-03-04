@@ -14,8 +14,8 @@ def main():
         'driver': 'sx',
     })
 
-    device.setSampleRate(SoapySDR.SOAPY_SDR_RX, 0, 125000.0)
-    device.setSampleRate(SoapySDR.SOAPY_SDR_TX, 0, 125000.0)
+    device.setSampleRate(SoapySDR.SOAPY_SDR_RX, 0, 75000.0)
+    device.setSampleRate(SoapySDR.SOAPY_SDR_TX, 0, 75000.0)
 
     device.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, 433.9e6)
     device.setFrequency(SoapySDR.SOAPY_SDR_TX, 0, 433.92e6)

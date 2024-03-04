@@ -10,6 +10,7 @@ import SoapySDR
 import numpy as np
 from scipy import signal
 
+SAMPLERATE=75000.0
 
 ################################
 ####  Using the SDR device  ####
@@ -20,8 +21,8 @@ def init_sdr():
     dev = SoapySDR.Device({
         'driver': 'sx',
     })
-    dev.setSampleRate(SoapySDR.SOAPY_SDR_RX, 0, 125000.0)
-    dev.setSampleRate(SoapySDR.SOAPY_SDR_TX, 0, 125000.0)
+    dev.setSampleRate(SoapySDR.SOAPY_SDR_RX, 0, SAMPLERATE)
+    dev.setSampleRate(SoapySDR.SOAPY_SDR_TX, 0, SAMPLERATE)
 
     dev.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, 432.55e6)
     dev.setFrequency(SoapySDR.SOAPY_SDR_TX, 0, 434.55e6)
@@ -111,7 +112,7 @@ def clip_signal(s):
     s /= np.maximum(np.abs(s), 1.0)
 
 class LinearRepeaterDsp:
-    def __init__(self, fs=125000.0):
+    def __init__(self, fs=SAMPLERATE):
         self.dc_blocker = IirFilter(signal.butter(1, 100.0, btype='highpass', output='ba', fs=fs))
         self.channel_filter1 = IirFilter(signal.butter(4, 12000.0, btype='lowpass', output='ba', fs=fs))
         self.channel_filter2 = IirFilter(signal.butter(4, 12000.0, btype='lowpass', output='ba', fs=fs))
