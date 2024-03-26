@@ -22,14 +22,14 @@ cd dts
 make clean
 ```
 
-If you have a prototype version 1.0, do:
+Depending on the version of your HAT:
 ```
+# For hardware version 1.0:
 make HAT_VERSION=0x0100
-```
-
-For version 1.1, do this instead:
-```
+# For hardware version 1.1:
 make HAT_VERSION=0x0101
+# For hardware version 1.2:
+make HAT_VERSION=0x0102
 ```
 
 Disable EEPROM write protection by placing a jumper between WP pins

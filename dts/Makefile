@@ -3,6 +3,7 @@
 BUILD_DIR=build
 EEPMAKE=eepmake
 EEPFLASH=eepflash.sh
+export EEPFLASH
 
 # If the HAT currently connected already has an UUID, keep it unmodified.
 # Otherwise let eepmake generate an UUID.
@@ -15,7 +16,7 @@ endif
 HAT_VERSION=$(file < /proc/device-tree/hat/product_ver)
 ifeq ($(HAT_VERSION),)
 # Default if hardware version is not specified
-HAT_VERSION:=0x0101
+HAT_VERSION:=0x0102
 endif
 
 ifeq ($(HAT_VERSION),0x0100)
@@ -30,11 +31,11 @@ define HAT_EEPROM_SETTINGS
 product_uuid $(HAT_UUID)
 product_id 0x1255
 product_ver $(HAT_VERSION)
-vendor OH2EAT
-product SXceiver
+vendor "OH2EAT"
+product "SXceiver"
 gpio_drive 0
 gpio_slew 0
-gpio_hysteresis 1
+gpio_hysteresis 2
 back_power 0
 setgpio $(HAT_TX_CONTROL_PIN) OUTPUT DOWN
 setgpio $(HAT_RX_CONTROL_PIN) OUTPUT DOWN
@@ -54,10 +55,11 @@ $(BUILD_DIR)/sx1255_raspberrypi.dtbo: sx1255_raspberrypi.dts | $(BUILD_DIR)
 	dtc -Wno-unit_address_vs_reg "$<" > "$@"
 
 $(BUILD_DIR)/eeprom.bin: $(BUILD_DIR)/eeprom_settings.txt $(BUILD_DIR)/sx1255_raspberrypi.dtbo | $(BUILD_DIR)
-	"$(EEPMAKE)" "$<" "$@" "$(BUILD_DIR)/sx1255_raspberrypi.dtbo"
+	$(EEPMAKE) "$<" "$@" "$(BUILD_DIR)/sx1255_raspberrypi.dtbo"
 
 write_eeprom: $(BUILD_DIR)/eeprom.bin
-	"$(EEPFLASH)" -w "-f=$<" -t=24c256
+	$(EEPFLASH) -y -w "-f=$<" -t=24c256
+	./verify_eeprom.sh "$<"
 
 clean:
 	rm -rf -- "$(BUILD_DIR)"
