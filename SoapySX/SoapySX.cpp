@@ -683,7 +683,6 @@ public:
         const double rate
     )
     {
-        // TODO (fixed sample rate for now)
         (void)direction; (void)channel;
         if (rate != rate || rate <= 0)
             throw std::runtime_error("Sample rate must be positive");
@@ -701,12 +700,23 @@ public:
         if (!found) {
             throw std::runtime_error("Unsupported sample rate");
         }
+        // Disable RX and TX before changing sample rate.
+        // Changing sample rate while RX/TX was running sometimes seemed
+        // to break ordering of data over I2S, causing things like swapped
+        // left and right channels or otherwise corrupted data.
+        // This seems to fix the problem.
+        set_register_bits(0x00, 1, 2, 0);
+        write_registers_to_chip(0x00, 1);
+        // Change the sample rate
         set_register_bits(0x12, 0, 4, r.clkout);
         set_register_bits(0x13, 7, 1, r.mant);
         set_register_bits(0x13, 6, 1, r.m);
         set_register_bits(0x13, 3, 3, r.n);
         write_registers_to_chip(0x12, 2);
         sampleRate = masterClock / divider;
+        // Enable RX and TX again
+        set_register_bits(0x00, 1, 2, 3);
+        write_registers_to_chip(0x00, 1);
     }
 
     double getSampleRate(
