@@ -989,6 +989,35 @@ public:
     }
 
 /***********************************************************************
+ * Other settings
+ **********************************************************************/
+
+    void writeSetting(
+        const std::string & key,
+        const std::string & value
+    )
+    {
+        // PA control modes
+        if (key == "PA") {
+            if (value == "ON") {
+                // PA always on
+                gpio_tx.set_value(1);
+                gpio_rx.set_value(0);
+            } else if (value == "OFF") {
+                // PA always off
+                gpio_tx.set_value(0);
+                gpio_rx.set_value(1);
+            } else if (value == "AUTO") { // or would STREAM be a better name for the value?
+                // PA on/off controlled by TX stream (default)
+                gpio_tx.set_value(1);
+                gpio_rx.set_value(1);
+            }
+        }
+    }
+
+    // TODO: readSetting, getSettingInfo
+
+/***********************************************************************
  * Low level interfaces
  **********************************************************************/
 
