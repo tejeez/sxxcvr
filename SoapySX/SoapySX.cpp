@@ -66,6 +66,19 @@ static uint16_t get_hardware_version(void)
     return product_ver;
 }
 
+// Convert raw received samples to CF32.
+// TODO: Support other formats and add format as a parameter.
+static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length)
+{
+    const int32_t *src_ = (const int32_t*)src + src_offset*2;
+    float *dest_ = (float*)dest + dest_offset*2;
+    const float scaling = 1.0f / 0x80000000L;
+    for (size_t i = 0; i < length*2; i++)
+    {
+        dest_[i] = scaling * (float)src_[i];
+    }
+}
+
 #define MAX_REGS 0x80
 
 // Number of initial register values for SX1255.
@@ -338,7 +351,7 @@ private:
         ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
         ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
         ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
-        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, SND_PCM_ACCESS_RW_INTERLEAVED));
+        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, dir == SND_PCM_STREAM_CAPTURE ? SND_PCM_ACCESS_MMAP_INTERLEAVED : SND_PCM_ACCESS_RW_INTERLEAVED));
         ALSACHECK(snd_pcm_hw_params_set_format(pcm, hwp, SND_PCM_FORMAT_S32_LE));
         // Sample rate given to ALSA does not affect the actual sample rate,
         // so just use a fixed "dummy" value.
@@ -570,33 +583,60 @@ public:
             throw std::runtime_error("Wrong direction");
         flags = 0;
 
-        std::vector<int32_t> raw(numElems*2);
-        snd_pcm_sframes_t nread = snd_pcm_readi(alsa_rx, raw.data(), numElems);
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_readi: %d", nread);
-        if (nread < 0) {
+        int ret = 0;
+        size_t samples_left = numElems;
+        size_t buff_offset = 0;
+        while (samples_left > 0) {
+            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
+            ret = snd_pcm_avail_delay(alsa_rx, &pcm_avail, &pcm_delay);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
+            if (ret < 0)
+                break;
+
+            bool wait_for_more_samples = 0;
+            // Number of samples to read
+            size_t n = (size_t)pcm_avail < samples_left ? (wait_for_more_samples = 1, (size_t)pcm_avail) : samples_left;
+
+            if (n > 0) {
+                const snd_pcm_channel_area_t *pcm_areas = NULL;
+                snd_pcm_uframes_t pcm_offset = 0, pcm_frames = n;
+                ret = snd_pcm_mmap_begin(alsa_rx, &pcm_areas, &pcm_offset, &pcm_frames);
+                if (ret < 0) {
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_mmap_begin: %d", ret);
+                    break;
+                }
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_mmap_begin: %d   %ld %d %d   %ld %ld",
+                    ret,
+                    pcm_areas->addr, pcm_areas->first, pcm_areas->step,
+                    pcm_offset, pcm_frames);
+                convert_rx_buffer(pcm_areas->addr, pcm_offset, buffs[0], buff_offset, pcm_frames);
+                snd_pcm_mmap_commit(alsa_rx, pcm_offset, pcm_frames);
+                buff_offset += pcm_frames;
+                samples_left -= pcm_frames;
+            }
+
+            if (wait_for_more_samples) {
+                ret = snd_pcm_wait(alsa_rx, -10001);
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_wait: %d", ret);
+            }
+        }
+
+        if (ret < 0) {
             // Some error (usually overrun) has happened.
             // Recover the stream automatically, so that the next read
             // will probably work again.
             // Some more testing and experimentation might be needed
             // to see whether this is the best way to do it,
             // particularly for linked streams. I am not sure yet.
-            int ret = snd_pcm_recover(alsa_rx, nread, 1);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (RX): %d", ret);
+            int ret2 = snd_pcm_recover(alsa_rx, ret, 1);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (RX): %d", ret2);
         }
-        if (nread == -EPIPE) // Overrun error
+        if (ret == -EPIPE) // Overrun error
             return SOAPY_SDR_OVERFLOW;
-        if (nread <= 0) // Some other error
+        if (ret < 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
 
-        // Fixed CF32 format for initial testing
-
-        float *converted = (float*)buffs[0];
-        const float scaling = 1.0f / 0x80000000L;
-        for (size_t i = 0; i < (size_t)nread*2; i++)
-        {
-            converted[i] = scaling * (float)raw[i];
-        }
-        return nread;
+        return buff_offset;
     }
 
    int writeStream(
