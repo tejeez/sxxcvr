@@ -205,20 +205,90 @@ public:
 };
 
 
-// Stream object created and returned by setupStream.
-// Currently, it only stores stream direction.
-// Maybe some other streaming related code could be moved here too.
-class SoapySXStream {
-private:
-    int direction;
+#define ALSACHECK(a) do {\
+int retcheck = (a); \
+if (retcheck < 0) { \
+SoapySDR_logf(SOAPY_SDR_ERROR, "\nALSA error in %s: %s\n", #a, snd_strerror(retcheck)); \
+goto alsa_error; } } while(0)
+
+class AlsaPcm {
 public:
-    SoapySXStream(const int direction):
-        direction(direction)
+    const char *name;
+    snd_pcm_t *pcm;
+    snd_pcm_stream_t dir;
+    bool setup_done;
+
+    AlsaPcm(const char *name, snd_pcm_stream_t dir):
+        name(name),
+        pcm(NULL),
+        dir(dir),
+        setup_done(0)
     {
     }
-    bool is_tx() const
+
+    void open(void)
     {
-        return direction != SOAPY_SDR_RX;
+        ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
+        return;
+
+        alsa_error:
+        if (pcm != NULL)
+            snd_pcm_close(pcm);
+
+        // TODO more detailed error messages?
+        throw std::runtime_error("Error opening ALSA device");
+    }
+
+    ~AlsaPcm()
+    {
+        if (pcm != NULL)
+            snd_pcm_close(pcm);
+    }
+
+    bool is_tx(void)
+    {
+        return dir == SND_PCM_STREAM_PLAYBACK;
+    }
+
+    void configure(void)
+    {
+        if (pcm == NULL)
+            return;
+        snd_pcm_hw_params_t *hwp = NULL;
+
+        unsigned int hwp_periods = 0;
+        // Period sizes smaller than 64 did not seem to work well
+        // in some tests. A higher period size somewhat reduces
+        // CPU use at the cost of increased minimum latency.
+        // Period and buffer sizes could be made configurable
+        // as a stream argument to let applications make
+        // a tradeoff between latency and CPU usage.
+        snd_pcm_uframes_t hwp_period_size = 256;
+        snd_pcm_uframes_t hwp_buffer_size = 8192;
+
+        ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
+        ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
+        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, dir == SND_PCM_STREAM_CAPTURE ? SND_PCM_ACCESS_MMAP_INTERLEAVED : SND_PCM_ACCESS_RW_INTERLEAVED));
+        ALSACHECK(snd_pcm_hw_params_set_format(pcm, hwp, SND_PCM_FORMAT_S32_LE));
+        // Sample rate given to ALSA does not affect the actual sample rate,
+        // so just use a fixed "dummy" value.
+        ALSACHECK(snd_pcm_hw_params_set_rate(pcm, hwp, 192000, 0));
+        ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
+        ALSACHECK(snd_pcm_hw_params_set_buffer_size_near(pcm, hwp, &hwp_buffer_size));
+        ALSACHECK(snd_pcm_hw_params_set_period_size_near(pcm, hwp, &hwp_period_size, 0));
+        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, &hwp_periods, 0));
+
+        ALSACHECK(snd_pcm_hw_params(pcm, hwp));
+        snd_pcm_hw_params_free(hwp);
+
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: buffer_size=%d, period_size=%d, periods=%d", hwp_buffer_size, hwp_period_size, hwp_periods);
+        return;
+
+    alsa_error:
+        if (hwp != NULL)
+            snd_pcm_hw_params_free(hwp);
+        // TODO more detailed error messages?
+        throw std::runtime_error("Error configuring ALSA device");
     }
 };
 
@@ -235,8 +305,8 @@ private:
     Spi spi;
     gpiod::chip gpio;
     gpiod::line gpio_reset, gpio_rx, gpio_tx;
-    snd_pcm_t *alsa_rx;
-    snd_pcm_t *alsa_tx;
+    AlsaPcm alsa_rx;
+    AlsaPcm alsa_tx;
 
     // Transmitter is turned on when squared magnitude of a TX sample
     // exceeds this threshold.
@@ -326,70 +396,6 @@ private:
         write_registers_to_chip(0, N_INIT_REGISTERS);
     }
 
-#define ALSACHECK(a) do {\
-    int retcheck = (a); \
-    if (retcheck < 0) { \
-    SoapySDR_logf(SOAPY_SDR_DEBUG, "\nALSA error in %s: %s\n", #a, snd_strerror(retcheck)); \
-    goto alsa_error; } } while(0)
-
-    // Open and configure ALSA for one direction.
-    static snd_pcm_t *init_alsa_dir(const char *name, snd_pcm_stream_t dir)
-    {
-        snd_pcm_t *pcm = NULL;
-        snd_pcm_hw_params_t *hwp = NULL;
-
-        unsigned int hwp_periods = 0;
-        // Period sizes smaller than 64 did not seem to work well
-        // in some tests. A higher period size somewhat reduces
-        // CPU use at the cost of increased minimum latency.
-        // Period and buffer sizes could be made configurable
-        // as a stream argument to let applications make
-        // a tradeoff between latency and CPU usage.
-        snd_pcm_uframes_t hwp_period_size = 256;
-        snd_pcm_uframes_t hwp_buffer_size = 8192;
-
-        ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
-        ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
-        ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
-        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, dir == SND_PCM_STREAM_CAPTURE ? SND_PCM_ACCESS_MMAP_INTERLEAVED : SND_PCM_ACCESS_RW_INTERLEAVED));
-        ALSACHECK(snd_pcm_hw_params_set_format(pcm, hwp, SND_PCM_FORMAT_S32_LE));
-        // Sample rate given to ALSA does not affect the actual sample rate,
-        // so just use a fixed "dummy" value.
-        ALSACHECK(snd_pcm_hw_params_set_rate(pcm, hwp, 192000, 0));
-        ALSACHECK(snd_pcm_hw_params_set_channels(pcm, hwp, 2));
-        ALSACHECK(snd_pcm_hw_params_set_buffer_size_near(pcm, hwp, &hwp_buffer_size));
-        ALSACHECK(snd_pcm_hw_params_set_period_size_near(pcm, hwp, &hwp_period_size, 0));
-        ALSACHECK(snd_pcm_hw_params_get_periods(hwp, &hwp_periods, 0));
-
-        ALSACHECK(snd_pcm_hw_params(pcm, hwp));
-        snd_pcm_hw_params_free(hwp);
-
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: buffer_size=%d, period_size=%d, periods=%d", hwp_buffer_size, hwp_period_size, hwp_periods);
-        return pcm;
-    alsa_error:
-        if (pcm != NULL)
-            snd_pcm_close(pcm);
-        if (hwp != NULL)
-            snd_pcm_hw_params_free(hwp);
-        // TODO more detailed error messages?
-        throw std::runtime_error("ALSA error");
-    }
-
-    void init_alsa(void)
-    {
-        // TODO: support custom ALSA names as a arguments
-        alsa_rx = init_alsa_dir("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE);
-        alsa_tx = init_alsa_dir("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK);
-    }
-
-    void close_alsa(void)
-    {
-        if (alsa_rx != NULL)
-            snd_pcm_close(alsa_rx);
-        if (alsa_tx != NULL)
-            snd_pcm_close(alsa_tx);
-    }
-
     bool does_synth_tune(double frequency)
     {
         setFrequency(SOAPY_SDR_RX, 0, frequency, {});
@@ -441,8 +447,8 @@ public:
         gpio_reset(gpio.get_line(5)),
         gpio_rx(gpio.get_line(hwversion == 0x0100 ? 13 : 23)),
         gpio_tx(gpio.get_line(hwversion == 0x0100 ? 12 : 22)),
-        alsa_rx(NULL),
-        alsa_tx(NULL),
+        alsa_rx(AlsaPcm("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE)),
+        alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
         tx_threshold2(0.0f),
         linked(false),
         regs{0}
@@ -455,14 +461,15 @@ public:
         reset_chip();
         init_chip();
         detect_clock();
-        init_alsa();
+        // Open ALSA devices now when I2S clocks are already running.
+        // I am not sure if this makes any difference but just in case.
+        alsa_rx.open();
+        alsa_tx.open();
     }
 
     ~SoapySX(void)
     {
         SoapySDR_logf(SOAPY_SDR_INFO, "Uninitializing SoapySX");
-
-        close_alsa();
 
         // Put SX1255 to sleep
         set_register_bits(0, 0, 4, 0);
@@ -484,8 +491,13 @@ public:
         (void)args; // Unused for now
         if (format != "CF32")
             throw std::runtime_error("Only CF32 format is currently supported");
-        // TODO: delete this also if an exception happens later in this function.
-        SoapySXStream *stream = new SoapySXStream(direction);
+
+        auto *stream = direction == SOAPY_SDR_RX ? &alsa_rx : &alsa_tx;
+
+        // Allow setting up only one stream per direction.
+        if (stream->setup_done)
+            throw std::runtime_error("Stream has been setup already");
+        stream->configure();
 
         if (stream->is_tx()) {
             const float tx_threshold_default = 1.0e-3;
@@ -496,18 +508,19 @@ public:
                 : tx_threshold_default;
             tx_threshold2 = tx_threshold * tx_threshold;
         }
+        stream->setup_done = 1;
 
         bool link = (args.count("link") > 0 && args.at("link") == "1");
-        if (link && (!linked)) {
+        if (link && (!linked) && alsa_rx.setup_done && alsa_tx.setup_done) {
             SoapySDR_logf(SOAPY_SDR_INFO, "Linking streams");
-            ALSACHECK(snd_pcm_link(alsa_rx, alsa_tx));
+            ALSACHECK(snd_pcm_link(alsa_rx.pcm, alsa_tx.pcm));
+            linked = 1;
         }
-        if ((!link) && linked) {
+        else if ((!link) && linked) {
             SoapySDR_logf(SOAPY_SDR_INFO, "Unlinking streams");
-            ALSACHECK(snd_pcm_unlink(alsa_rx));
-            ALSACHECK(snd_pcm_unlink(alsa_tx));
+            ALSACHECK(snd_pcm_unlink(alsa_tx.pcm));
+            linked = 0;
         }
-        linked = link;
 
         return reinterpret_cast<SoapySDR::Stream *>(stream);
     alsa_error:
@@ -517,8 +530,8 @@ public:
 
     void closeStream(SoapySDR::Stream * handle)
     {
-        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
-        delete stream;
+        auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        stream->setup_done = 0;
     }
 
     int activateStream(
@@ -529,18 +542,18 @@ public:
     )
     {
         (void)flags; (void)timeNs; (void)numElems;
-        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         SoapySDR_logf(SOAPY_SDR_INFO, "Activating stream");
         if (stream->is_tx()) {
-            ALSACHECK(snd_pcm_prepare(alsa_tx));
+            ALSACHECK(snd_pcm_prepare(stream->pcm));
         } else {
             if (!linked) {
                 // If streams are linked, preparing TX stream
                 // also prepares the RX stream.
-                ALSACHECK(snd_pcm_prepare(alsa_rx));
+                ALSACHECK(snd_pcm_prepare(alsa_rx.pcm));
                 // If streams are linked, let the first write to TX stream
                 // also start the RX stream. Otherwise start it here.
-                ALSACHECK(snd_pcm_start(alsa_rx));
+                ALSACHECK(snd_pcm_start(alsa_rx.pcm));
             }
         }
         return 0;
@@ -555,13 +568,9 @@ public:
     )
     {
         (void)flags; (void)timeNs;
-        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         SoapySDR_logf(SOAPY_SDR_INFO, "Deactivating stream");
-        if (stream->is_tx()) {
-            ALSACHECK(snd_pcm_drop(alsa_tx));
-        } else {
-            ALSACHECK(snd_pcm_drop(alsa_rx));
-        }
+        ALSACHECK(snd_pcm_drop(stream->pcm));
         return 0;
     alsa_error:
         return SOAPY_SDR_STREAM_ERROR;
@@ -578,9 +587,11 @@ public:
     {
         (void)timeNs;
         (void)timeoutUs; // TODO: timeout
-        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
+        snd_pcm_t *pcm = stream->pcm;
+
         flags = 0;
 
         int ret = 0;
@@ -588,7 +599,7 @@ public:
         size_t buff_offset = 0;
         while (samples_left > 0) {
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-            ret = snd_pcm_avail_delay(alsa_rx, &pcm_avail, &pcm_delay);
+            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
             SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
             if (ret < 0)
                 break;
@@ -600,7 +611,7 @@ public:
             if (n > 0) {
                 const snd_pcm_channel_area_t *pcm_areas = NULL;
                 snd_pcm_uframes_t pcm_offset = 0, pcm_frames = n;
-                ret = snd_pcm_mmap_begin(alsa_rx, &pcm_areas, &pcm_offset, &pcm_frames);
+                ret = snd_pcm_mmap_begin(pcm, &pcm_areas, &pcm_offset, &pcm_frames);
                 if (ret < 0) {
                     SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_mmap_begin: %d", ret);
                     break;
@@ -610,13 +621,13 @@ public:
                     pcm_areas->addr, pcm_areas->first, pcm_areas->step,
                     pcm_offset, pcm_frames);
                 convert_rx_buffer(pcm_areas->addr, pcm_offset, buffs[0], buff_offset, pcm_frames);
-                snd_pcm_mmap_commit(alsa_rx, pcm_offset, pcm_frames);
+                snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
                 buff_offset += pcm_frames;
                 samples_left -= pcm_frames;
             }
 
             if (wait_for_more_samples) {
-                ret = snd_pcm_wait(alsa_rx, -10001);
+                ret = snd_pcm_wait(pcm, -10001);
                 SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_wait: %d", ret);
             }
         }
@@ -628,7 +639,7 @@ public:
             // Some more testing and experimentation might be needed
             // to see whether this is the best way to do it,
             // particularly for linked streams. I am not sure yet.
-            int ret2 = snd_pcm_recover(alsa_rx, ret, 1);
+            int ret2 = snd_pcm_recover(pcm, ret, 1);
             SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (RX): %d", ret2);
         }
         if (ret == -EPIPE) // Overrun error
@@ -650,9 +661,11 @@ public:
     {
         (void)timeNs;
         (void)timeoutUs; // TODO: timeout
-        SoapySXStream *stream = reinterpret_cast<SoapySXStream *>(handle);
+        auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         if (!stream->is_tx())
             throw std::runtime_error("Wrong direction");
+        snd_pcm_t *pcm = stream->pcm;
+
         flags = 0;
 
         // Format conversion
@@ -676,13 +689,13 @@ public:
             raw[i+1] = vq;
         }
 
-        snd_pcm_sframes_t nwritten = snd_pcm_writei(alsa_tx, raw.data(), numElems);
+        snd_pcm_sframes_t nwritten = snd_pcm_writei(pcm, raw.data(), numElems);
         SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_writei: %d", nwritten);
         if (nwritten < 0) {
             // Some error (usually underrun) has happened.
             // Recover the stream automatically, so that the next write
             // will probably work again.
-            int ret = snd_pcm_recover(alsa_tx, nwritten, 1);
+            int ret = snd_pcm_recover(pcm, nwritten, 1);
             SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (TX): %d", ret);
         }
         if (nwritten == -EPIPE) // Underrun error
