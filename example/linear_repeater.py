@@ -30,22 +30,23 @@ def init_sdr():
     dev.setGain(SoapySDR.SOAPY_SDR_RX, 0, 50.0)
     dev.setGain(SoapySDR.SOAPY_SDR_TX, 0, 0.0)
 
-    # Stream argument link=1 links the streams together,
-    # so that they start at the same time.
     # Set transmitter enable threshold to 0 to keep transmitter always on.
-    rx = dev.setupStream(SoapySDR.SOAPY_SDR_RX, SoapySDR.SOAPY_SDR_CF32, [0], {'link':'1'})
-    tx = dev.setupStream(SoapySDR.SOAPY_SDR_TX, SoapySDR.SOAPY_SDR_CF32, [0], {'link':'1', 'threshold':'0'})
+    rx = dev.setupStream(SoapySDR.SOAPY_SDR_RX, SoapySDR.SOAPY_SDR_CF32, [0], {})
+    tx = dev.setupStream(SoapySDR.SOAPY_SDR_TX, SoapySDR.SOAPY_SDR_CF32, [0], {'threshold':'0'})
     return (dev, rx, tx)
 
 class FullDuplexIo:
     """Full duplex signal I/O using SoapySDR."""
     def __init__(self, device, rx_stream, tx_stream, buffer_samples = 256, latency_samples = 256*3):
-        self.streams_running = False
         self.buf = np.zeros(buffer_samples, dtype=np.complex64)
-        self.tx_start_buf = np.zeros(latency_samples, dtype=np.complex64)
+        #self.tx_start_buf = np.zeros(latency_samples, dtype=np.complex64)
+        # Convert latency from samples to nanoseconds
+        self.rx_tx_time_diff = int(round(latency_samples * 1e9 / SAMPLERATE))
         self.dev = device
         self.rx = rx_stream
         self.tx = tx_stream
+        self.dev.activateStream(self.rx)
+        self.dev.activateStream(self.tx)
 
     def run(self, process):
         """Call this in a loop as long as the application should be running.
@@ -54,43 +55,21 @@ class FullDuplexIo:
         in the given buffer and write transmit signal into the same buffer.
         The function should not change the length of the buffer.
         """
-        # Set to false if something goes wrong
-        ok = True
+        rxret = self.dev.readStream(self.rx, [self.buf], len(self.buf))
+        logging.info('RX ret %s' % rxret)
+        if rxret.ret != len(self.buf):
+            logging.warning('RX read failed: %s' % rxret)
+            return
 
-        if not self.streams_running:
-            self.dev.activateStream(self.rx)
-            self.dev.activateStream(self.tx)
-            # Start streaming by writing something in the transmit buffer.
-            # If every read of RX stream after this is followed by
-            # a write of TX stream of equal size, the amount initially
-            # written into TX buffer determines the round-trip latency.
-            ret = self.dev.writeStream(self.tx, [self.tx_start_buf], len(self.tx_start_buf))
-            if ret.ret == len(self.tx_start_buf):
-                self.streams_running = True
-            else:
-                ok = False
-
-        if ok:
-            rxret = self.dev.readStream(self.rx, [self.buf], len(self.buf))
-            if rxret.ret != len(self.buf):
-                logging.warning('RX read failed: %s' % rxret)
-                ok = False
-
-        if ok:
-            process(self.buf)
-            txret = self.dev.writeStream(self.tx, [self.buf], len(self.buf))
-            if txret.ret != len(self.buf):
-                logging.warning('TX write failed: %s' % txret)
-                ok = False
-
-        if not ok:
-            # If a read or write failed, an under- or overrun may have happened,
-            # losing synchronization of RX and TX streams.
-            # Recover by stopping streams and restarting them next time.
-            logging.warning('Restarting streams to recover')
-            self.streams_running = False
-            self.dev.deactivateStream(self.rx)
-            self.dev.deactivateStream(self.tx)
+        process(self.buf)
+        txret = self.dev.writeStream(
+            self.tx,
+            [self.buf], len(self.buf),
+            flags = SoapySDR.SOAPY_SDR_HAS_TIME,
+            timeNs = rxret.timeNs + self.rx_tx_time_diff
+        )
+        if txret.ret != len(self.buf):
+            logging.warning('TX write failed: %s' % txret)
 
 
 #############################
@@ -137,6 +116,7 @@ class LinearRepeaterDsp:
 
 def main():
     logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s')
+    #SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_DEBUG)
 
     try:
         os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(10))

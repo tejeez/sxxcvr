@@ -20,6 +20,23 @@
 #include <alsa/control.h>
 #include <gpiod.hpp>
 
+// Streaming mode, affecting how starting, stopping, overruns and underruns
+// are handled.
+enum stream_mode {
+    // Behave like most SDRs: RX overrun or TX underrun
+    // may cause samples to be dropped, but streams will keep running.
+    // Application can use timestamps to maintain correct timing.
+    STREAM_MODE_NORMAL,
+    // Behave like linked ALSA PCMs with default software parameters.
+    // Overrun or underrun causes both RX and TX streams to stop.
+    // TX buffer must be always kept filled to avoid underrun.
+    // First write to TX stream starts both streams.
+    // This was a stop-gap solution before implementation of timestamps
+    // and is primarily kept here for compatibility with applications
+    // that have not been modified to use timestamps yet.
+    STREAM_MODE_LINK,
+};
+
 // Clamp, offset, scale and quantize a value based on a SoapySDR::Range
 // and convert it to an integer.
 // The value is offset so that the minimum value becomes 0
@@ -241,13 +258,19 @@ public:
     const char *name;
     snd_pcm_t *pcm;
     snd_pcm_stream_t dir;
+    enum stream_mode stream_mode;
     bool setup_done;
+    bool activated;
+    int64_t position;
 
     AlsaPcm(const char *name, snd_pcm_stream_t dir):
         name(name),
         pcm(NULL),
         dir(dir),
-        setup_done(0)
+        stream_mode(STREAM_MODE_NORMAL),
+        setup_done(0),
+        activated(0),
+        position(0)
     {
     }
 
@@ -275,11 +298,12 @@ public:
         return dir == SND_PCM_STREAM_PLAYBACK;
     }
 
-    void configure(void)
+    void configure()
     {
         if (pcm == NULL)
             return;
         snd_pcm_hw_params_t *hwp = NULL;
+        snd_pcm_sw_params_t *swp = NULL;
 
         unsigned int hwp_periods = 0;
         // Period sizes smaller than 64 did not seem to work well
@@ -290,6 +314,8 @@ public:
         // a tradeoff between latency and CPU usage.
         snd_pcm_uframes_t hwp_period_size = 256;
         snd_pcm_uframes_t hwp_buffer_size = 8192;
+
+        snd_pcm_uframes_t swp_boundary = 0;
 
         ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
         ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
@@ -307,11 +333,34 @@ public:
         snd_pcm_hw_params_free(hwp);
 
         SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA parameters: buffer_size=%d, period_size=%d, periods=%d", hwp_buffer_size, hwp_period_size, hwp_periods);
+
+        ALSACHECK(snd_pcm_sw_params_malloc(&swp));
+        ALSACHECK(snd_pcm_sw_params_current(pcm, swp));
+        ALSACHECK(snd_pcm_sw_params_get_boundary(swp, &swp_boundary));
+        SoapySDR_logf(SOAPY_SDR_DEBUG, "ALSA SW parameters: boundary=%lu", swp_boundary);
+        if (stream_mode == STREAM_MODE_NORMAL) {
+            ALSACHECK(snd_pcm_sw_params_set_stop_threshold(pcm, swp, swp_boundary));
+            // https://stackoverflow.com/a/20515251
+            ALSACHECK(snd_pcm_sw_params_set_silence_threshold(pcm, swp, 0));
+            ALSACHECK(snd_pcm_sw_params_set_silence_size(pcm, swp, swp_boundary));
+        } else {
+            ALSACHECK(snd_pcm_sw_params_set_stop_threshold(pcm, swp, 0));
+            ALSACHECK(snd_pcm_sw_params_set_silence_threshold(pcm, swp, 0));
+            ALSACHECK(snd_pcm_sw_params_set_silence_size(pcm, swp, 0));
+        }
+
+        ALSACHECK(snd_pcm_sw_params(pcm, swp));
+        snd_pcm_sw_params_free(swp);
+
+        ALSACHECK(snd_pcm_prepare(pcm));
+
         return;
 
     alsa_error:
         if (hwp != NULL)
             snd_pcm_hw_params_free(hwp);
+        if (swp != NULL)
+            snd_pcm_sw_params_free(swp);
         // TODO more detailed error messages?
         throw std::runtime_error("Error configuring ALSA device");
     }
@@ -344,6 +393,22 @@ private:
     // specific bits since they do not need to be read
     // from the chip every time.
     uint8_t regs[MAX_REGS];
+
+    // Convert a SoapySDR nanosecond timestamp to a sample counter.
+    int64_t timestamp_to_samples(long long timestamp)
+    {
+        // FIXME: floating point math start to lose precision
+        // when timestamp grows large. This works for initial testing though.
+        return round((double)timestamp * sampleRate / 1.0e9);
+    }
+
+    // Convert a sample counter to a SoapySDR nanosecond timestamp.
+    long long samples_to_timestamp(int64_t samples)
+    {
+        // FIXME: floating point math start to lose precision
+        // when timestamp grows large. This works for initial testing though.
+        return round((double)samples * 1.0e9 / sampleRate);
+    }
 
     // Set given bits of a register.
     // The registers are not actually written to the chip.
@@ -522,7 +587,6 @@ public:
         // Allow setting up only one stream per direction.
         if (stream->setup_done)
             throw std::runtime_error("Stream has been setup already");
-        stream->configure();
 
         if (stream->is_tx()) {
             const float tx_threshold_default = 1.0e-3;
@@ -533,18 +597,19 @@ public:
                 : tx_threshold_default;
             tx_threshold2 = tx_threshold * tx_threshold;
         }
+
+        bool arg_link = (args.count("link") > 0 && args.at("link") == "1");
+        stream->stream_mode = arg_link ? STREAM_MODE_LINK : STREAM_MODE_NORMAL;
+
+        stream->configure();
+
         stream->setup_done = 1;
 
-        bool link = (args.count("link") > 0 && args.at("link") == "1");
-        if (link && (!linked) && alsa_rx.setup_done && alsa_tx.setup_done) {
+        // Always link RX and TX PCMs if both have been setup.
+        if ((!linked) && alsa_rx.setup_done && alsa_tx.setup_done) {
             SoapySDR_logf(SOAPY_SDR_INFO, "Linking streams");
             ALSACHECK(snd_pcm_link(alsa_rx.pcm, alsa_tx.pcm));
             linked = 1;
-        }
-        else if ((!link) && linked) {
-            SoapySDR_logf(SOAPY_SDR_INFO, "Unlinking streams");
-            ALSACHECK(snd_pcm_unlink(alsa_tx.pcm));
-            linked = 0;
         }
 
         return reinterpret_cast<SoapySDR::Stream *>(stream);
@@ -568,19 +633,12 @@ public:
     {
         (void)flags; (void)timeNs; (void)numElems;
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
-        SoapySDR_logf(SOAPY_SDR_INFO, "Activating stream");
-        if (stream->is_tx()) {
-            ALSACHECK(snd_pcm_prepare(stream->pcm));
-        } else {
-            if (!linked) {
-                // If streams are linked, preparing TX stream
-                // also prepares the RX stream.
-                ALSACHECK(snd_pcm_prepare(alsa_rx.pcm));
-                // If streams are linked, let the first write to TX stream
-                // also start the RX stream. Otherwise start it here.
-                ALSACHECK(snd_pcm_start(alsa_rx.pcm));
-            }
+        stream->activated = 1;
+
+        if ((!stream->is_tx()) && stream->stream_mode == STREAM_MODE_NORMAL) {
+            ALSACHECK(snd_pcm_start(stream->pcm));
         }
+
         return 0;
     alsa_error:
         return SOAPY_SDR_STREAM_ERROR;
@@ -594,6 +652,7 @@ public:
     {
         (void)flags; (void)timeNs;
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        stream->activated = 0;
         SoapySDR_logf(SOAPY_SDR_INFO, "Deactivating stream");
         ALSACHECK(snd_pcm_drop(stream->pcm));
         return 0;
@@ -617,7 +676,8 @@ public:
             throw std::runtime_error("Wrong direction");
         snd_pcm_t *pcm = stream->pcm;
 
-        flags = 0;
+        timeNs = samples_to_timestamp(stream->position);
+        flags = SOAPY_SDR_HAS_TIME;
 
         int ret = 0;
         size_t buff_offset = 0;
@@ -658,6 +718,7 @@ public:
                     break;
                 }
                 buff_offset += committed;
+                stream->position += committed;
             }
 
             if (wait_for_more_samples) {
@@ -700,7 +761,37 @@ public:
             throw std::runtime_error("Wrong direction");
         snd_pcm_t *pcm = stream->pcm;
 
-        flags = 0;
+        if (flags & SOAPY_SDR_HAS_TIME) {
+            int64_t new_position = timestamp_to_samples(timeNs);
+            int64_t posdiff = new_position - stream->position;
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx timestamp posdiff=%ld", posdiff);
+            if (posdiff < 0) {
+                return SOAPY_SDR_TIME_ERROR;
+            }
+            while (posdiff > 0) {
+                snd_pcm_sframes_t fwd = snd_pcm_forwardable(pcm);
+                if (fwd < 0) {
+                    // TODO: check if it can fail and think what to actually do here
+                    return SOAPY_SDR_STREAM_ERROR;
+                }
+                if (posdiff < (int64_t)fwd) {
+                    fwd = snd_pcm_forward(pcm, (snd_pcm_sframes_t)posdiff);
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx forward1 %d", fwd);
+                } else {
+                    fwd = snd_pcm_forward(pcm, fwd);
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx forward2 %d", fwd);
+                    // Wait for more space
+                    int waitret = snd_pcm_wait(pcm, -10001);
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx forward snd_pcm_wait: %d", waitret);
+                }
+                if (fwd < 0) {
+                    // TODO: check if it can fail and think what to actually do here
+                    return SOAPY_SDR_STREAM_ERROR;
+                }
+                stream->position += fwd;
+                posdiff -= fwd;
+            }
+        }
 
         int ret = 0;
         size_t buff_offset = 0;
@@ -742,18 +833,21 @@ public:
                     break;
                 }
                 buff_offset += committed;
+                stream->position += committed;
             }
 
             if (wait_for_more_space) {
                 ret = snd_pcm_wait(pcm, -10001);
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_wait: %d", ret);
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_wait: %d", ret);
             }
         }
 
         // mmap_commit does not automatically start a stream like a write does,
         // so start it here if needed.
-        if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED)
+        if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED) {
             ret = snd_pcm_start(pcm);
+            SoapySDR_logf(SOAPY_SDR_INFO, "tx snd_pcm_start: %d", ret);
+        }
 
         if (ret < 0) {
             // Some error (usually underrun) has happened.
