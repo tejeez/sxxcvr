@@ -79,6 +79,31 @@ static inline void convert_rx_buffer(const void *src, size_t src_offset, void *d
     }
 }
 
+// Convert CF32 to raw transmit samples.
+// TODO: Support other formats and add format as a parameter.
+static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2)
+{
+    const float *src_ = (const float*)src + src_offset*2;
+    int32_t *dest_ = (int32_t*)dest + dest_offset*2;
+    const float scaling = (float)0x7FFFFFFFL;
+    for (size_t i = 0; i < length*2; i+=2)
+    {
+        float fi = src_[i], fq = src_[i+1];
+        int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
+        int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
+        // Second lowest bit of each "I" sample controls RX/TX switching.
+        // Set the lowest bit to the same value just in case.
+        // Let's also reserve the 2 lowest bits of "Q" samples
+        // for future extensions and keep them as 0.
+        vi &= 0xFFFFFFFCL;
+        vq &= 0xFFFFFFFCL;
+        if (fi*fi + fq*fq >= tx_threshold2)
+            vi |= 0b11L;
+        dest_[i  ] = vi;
+        dest_[i+1] = vq;
+    }
+}
+
 #define MAX_REGS 0x80
 
 // Number of initial register values for SX1255.
@@ -268,7 +293,7 @@ public:
 
         ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
         ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
-        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, dir == SND_PCM_STREAM_CAPTURE ? SND_PCM_ACCESS_MMAP_INTERLEAVED : SND_PCM_ACCESS_RW_INTERLEAVED));
+        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, SND_PCM_ACCESS_MMAP_INTERLEAVED));
         ALSACHECK(snd_pcm_hw_params_set_format(pcm, hwp, SND_PCM_FORMAT_S32_LE));
         // Sample rate given to ALSA does not affect the actual sample rate,
         // so just use a fixed "dummy" value.
@@ -595,40 +620,49 @@ public:
         flags = 0;
 
         int ret = 0;
-        size_t samples_left = numElems;
         size_t buff_offset = 0;
-        while (samples_left > 0) {
+        while (buff_offset < numElems) {
             snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
             ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
             if (ret < 0)
                 break;
 
             bool wait_for_more_samples = 0;
             // Number of samples to read
-            size_t n = (size_t)pcm_avail < samples_left ? (wait_for_more_samples = 1, (size_t)pcm_avail) : samples_left;
+            size_t n = numElems - buff_offset;
+            if (pcm_avail < 0) {
+                n = 0;
+                wait_for_more_samples = 1;
+            } else if ((size_t)pcm_avail < n) {
+                n = (size_t)pcm_avail;
+                wait_for_more_samples = 1;
+            }
 
             if (n > 0) {
                 const snd_pcm_channel_area_t *pcm_areas = NULL;
                 snd_pcm_uframes_t pcm_offset = 0, pcm_frames = n;
                 ret = snd_pcm_mmap_begin(pcm, &pcm_areas, &pcm_offset, &pcm_frames);
                 if (ret < 0) {
-                    SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_mmap_begin: %d", ret);
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_mmap_begin: %d", ret);
                     break;
                 }
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_mmap_begin: %d   %ld %d %d   %ld %ld",
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_mmap_begin: %d   %ld %d %d   %ld %ld",
                     ret,
                     pcm_areas->addr, pcm_areas->first, pcm_areas->step,
                     pcm_offset, pcm_frames);
                 convert_rx_buffer(pcm_areas->addr, pcm_offset, buffs[0], buff_offset, pcm_frames);
-                snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
-                buff_offset += pcm_frames;
-                samples_left -= pcm_frames;
+                snd_pcm_sframes_t committed = snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
+                if (committed < 0) {
+                    ret = (int)committed;
+                    break;
+                }
+                buff_offset += committed;
             }
 
             if (wait_for_more_samples) {
                 ret = snd_pcm_wait(pcm, -10001);
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_wait: %d", ret);
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_wait: %d", ret);
             }
         }
 
@@ -640,7 +674,7 @@ public:
             // to see whether this is the best way to do it,
             // particularly for linked streams. I am not sure yet.
             int ret2 = snd_pcm_recover(pcm, ret, 1);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (RX): %d", ret2);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_recover (RX): %d", ret2);
         }
         if (ret == -EPIPE) // Overrun error
             return SOAPY_SDR_OVERFLOW;
@@ -668,41 +702,71 @@ public:
 
         flags = 0;
 
-        // Format conversion
-        float *input = (float*)buffs[0];
-        std::vector<int32_t> raw(numElems*2);
-        const float scaling = (float)0x7FFFFFFFL;
-        for (size_t i = 0; i < numElems*2; i+=2)
-        {
-            float fi = input[i], fq = input[i+1];
-            int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
-            int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
-            // Second lowest bit of each "I" sample controls RX/TX switching.
-            // Set the lowest bit to the same value just in case.
-            // Let's also reserve the 2 lowest bits of "Q" samples
-            // for future extensions and keep them as 0.
-            vi &= 0xFFFFFFFCL;
-            vq &= 0xFFFFFFFCL;
-            if (fi*fi + fq*fq >= tx_threshold2)
-                vi |= 0b11L;
-            raw[i  ] = vi;
-            raw[i+1] = vq;
+        int ret = 0;
+        size_t buff_offset = 0;
+        while (buff_offset < numElems) {
+            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
+            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
+            if (ret < 0)
+                break;
+
+            bool wait_for_more_space = 0;
+            // Number of samples to write
+            size_t n = numElems - buff_offset;
+            if (pcm_avail < 0) {
+                n = 0;
+                wait_for_more_space = 1;
+            } else if ((size_t)pcm_avail < n) {
+                n = (size_t)pcm_avail;
+                wait_for_more_space = 1;
+            }
+
+            if (n > 0) {
+                const snd_pcm_channel_area_t *pcm_areas = NULL;
+                snd_pcm_uframes_t pcm_offset = 0, pcm_frames = n;
+                ret = snd_pcm_mmap_begin(pcm, &pcm_areas, &pcm_offset, &pcm_frames);
+                if (ret < 0) {
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_begin: %d", ret);
+                    break;
+                }
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_begin: %d   %ld %d %d   %ld %ld",
+                    ret,
+                    pcm_areas->addr, pcm_areas->first, pcm_areas->step,
+                    pcm_offset, pcm_frames);
+                convert_tx_buffer(buffs[0], buff_offset, pcm_areas->addr, pcm_offset, pcm_frames, tx_threshold2);
+                snd_pcm_sframes_t committed = snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_commit: %ld", committed);
+                if (committed < 0) {
+                    ret = (int)committed;
+                    break;
+                }
+                buff_offset += committed;
+            }
+
+            if (wait_for_more_space) {
+                ret = snd_pcm_wait(pcm, -10001);
+                SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_wait: %d", ret);
+            }
         }
 
-        snd_pcm_sframes_t nwritten = snd_pcm_writei(pcm, raw.data(), numElems);
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_writei: %d", nwritten);
-        if (nwritten < 0) {
+        // mmap_commit does not automatically start a stream like a write does,
+        // so start it here if needed.
+        if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED)
+            ret = snd_pcm_start(pcm);
+
+        if (ret < 0) {
             // Some error (usually underrun) has happened.
             // Recover the stream automatically, so that the next write
             // will probably work again.
-            int ret = snd_pcm_recover(pcm, nwritten, 1);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "snd_pcm_recover (TX): %d", ret);
+            int ret2 = snd_pcm_recover(pcm, ret, 1);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_recover (TX): %d", ret2);
         }
-        if (nwritten == -EPIPE) // Underrun error
+        if (ret == -EPIPE) // Underrun error
             return SOAPY_SDR_UNDERFLOW;
-        if (nwritten <= 0) // Some other error
+        if (ret < 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
-        return nwritten;
+        return buff_offset;
     }
 
 /***********************************************************************
