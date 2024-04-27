@@ -298,6 +298,21 @@ public:
         return dir == SND_PCM_STREAM_PLAYBACK;
     }
 
+    int reset()
+    {
+        int ret = 0;
+        // Make sure stream is stopped. If it was stopped already,
+        // drop will fail but that is fine, so do not check the return value.
+        snd_pcm_drop(pcm);
+
+        ret = snd_pcm_prepare(pcm);
+        if (ret < 0)
+            return ret;
+        position = 0;
+        ret = snd_pcm_reset(pcm);
+        return ret;
+    }
+
     void configure()
     {
         if (pcm == NULL)
@@ -344,7 +359,7 @@ public:
             ALSACHECK(snd_pcm_sw_params_set_silence_threshold(pcm, swp, 0));
             ALSACHECK(snd_pcm_sw_params_set_silence_size(pcm, swp, swp_boundary));
         } else {
-            ALSACHECK(snd_pcm_sw_params_set_stop_threshold(pcm, swp, 0));
+            ALSACHECK(snd_pcm_sw_params_set_stop_threshold(pcm, swp, hwp_buffer_size));
             ALSACHECK(snd_pcm_sw_params_set_silence_threshold(pcm, swp, 0));
             ALSACHECK(snd_pcm_sw_params_set_silence_size(pcm, swp, 0));
         }
@@ -352,7 +367,7 @@ public:
         ALSACHECK(snd_pcm_sw_params(pcm, swp));
         snd_pcm_sw_params_free(swp);
 
-        ALSACHECK(snd_pcm_prepare(pcm));
+        ALSACHECK(reset());
 
         return;
 
@@ -581,6 +596,11 @@ public:
         (void)args; // Unused for now
         if (format != "CF32")
             throw std::runtime_error("Only CF32 format is currently supported");
+        if (
+            (snd_pcm_state(alsa_rx.pcm) == SND_PCM_STATE_RUNNING) ||
+            (snd_pcm_state(alsa_tx.pcm) == SND_PCM_STATE_RUNNING)
+        )
+            throw std::runtime_error("Streams can be setup only if none of the streams are running");
 
         auto *stream = direction == SOAPY_SDR_RX ? &alsa_rx : &alsa_tx;
 
@@ -633,10 +653,16 @@ public:
     {
         (void)flags; (void)timeNs; (void)numElems;
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        if (stream->activated) {
+            SoapySDR_logf(SOAPY_SDR_ERROR, "Stream was already activated");
+            return SOAPY_SDR_STREAM_ERROR;
+        }
         stream->activated = 1;
 
-        if ((!stream->is_tx()) && stream->stream_mode == STREAM_MODE_NORMAL) {
-            ALSACHECK(snd_pcm_start(stream->pcm));
+        if (stream->stream_mode == STREAM_MODE_NORMAL) {
+            if (snd_pcm_state(stream->pcm) == SND_PCM_STATE_PREPARED) {
+                ALSACHECK(snd_pcm_start(stream->pcm));
+            }
         }
 
         return 0;
@@ -652,15 +678,25 @@ public:
     {
         (void)flags; (void)timeNs;
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        if (!stream->activated) {
+            SoapySDR_logf(SOAPY_SDR_ERROR, "Stream was already deactivated");
+            return SOAPY_SDR_STREAM_ERROR;
+        }
         stream->activated = 0;
-        SoapySDR_logf(SOAPY_SDR_INFO, "Deactivating stream");
-        ALSACHECK(snd_pcm_drop(stream->pcm));
+
+        // If both streams have been deactivated, stop them.
+        if ((!alsa_rx.activated) && (!alsa_tx.activated)) {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Stopping and resetting streams");
+            ALSACHECK(alsa_rx.reset());
+            ALSACHECK(alsa_tx.reset());
+        }
+
         return 0;
     alsa_error:
         return SOAPY_SDR_STREAM_ERROR;
     }
 
-   int readStream(
+    int readStream(
         SoapySDR::Stream * handle,
         void *const * buffs,
         const size_t numElems,
@@ -727,16 +763,6 @@ public:
             }
         }
 
-        if (ret < 0) {
-            // Some error (usually overrun) has happened.
-            // Recover the stream automatically, so that the next read
-            // will probably work again.
-            // Some more testing and experimentation might be needed
-            // to see whether this is the best way to do it,
-            // particularly for linked streams. I am not sure yet.
-            int ret2 = snd_pcm_recover(pcm, ret, 1);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_recover (RX): %d", ret2);
-        }
         if (ret == -EPIPE) // Overrun error
             return SOAPY_SDR_OVERFLOW;
         if (ret < 0) // Some other error
@@ -844,18 +870,11 @@ public:
 
         // mmap_commit does not automatically start a stream like a write does,
         // so start it here if needed.
-        if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED) {
+        if (ret >= 0 && snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED) {
             ret = snd_pcm_start(pcm);
-            SoapySDR_logf(SOAPY_SDR_INFO, "tx snd_pcm_start: %d", ret);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_start: %d", ret);
         }
 
-        if (ret < 0) {
-            // Some error (usually underrun) has happened.
-            // Recover the stream automatically, so that the next write
-            // will probably work again.
-            int ret2 = snd_pcm_recover(pcm, ret, 1);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_recover (TX): %d", ret2);
-        }
         if (ret == -EPIPE) // Underrun error
             return SOAPY_SDR_UNDERFLOW;
         if (ret < 0) // Some other error
