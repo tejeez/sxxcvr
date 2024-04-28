@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <thread>
+#include <mutex>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -257,6 +258,7 @@ class AlsaPcm {
 public:
     const char *name;
     snd_pcm_t *pcm;
+    std::mutex mutex;
     snd_pcm_stream_t dir;
     enum stream_mode stream_mode;
     bool setup_done;
@@ -390,6 +392,10 @@ class SoapySX : public SoapySDR::Device
 private:
     double masterClock;
     double sampleRate;
+
+    // Mutex for anything involving SX1255 registers
+    // to avoid problems if an application calls methods from multiple threads.
+    mutable std::recursive_mutex reg_mutex;
 
     Spi spi;
     gpiod::chip gpio;
@@ -594,6 +600,9 @@ public:
     {
         (void)channels; // Only one channel
         (void)args; // Unused for now
+
+        std::scoped_lock lock(alsa_rx.mutex, alsa_tx.mutex);
+
         if (format != "CF32")
             throw std::runtime_error("Only CF32 format is currently supported");
         if (
@@ -641,6 +650,7 @@ public:
     void closeStream(SoapySDR::Stream * handle)
     {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        std::scoped_lock(stream->mutex);
         stream->setup_done = 0;
     }
 
@@ -652,6 +662,9 @@ public:
     )
     {
         (void)flags; (void)timeNs; (void)numElems;
+
+        std::scoped_lock rx_lock(alsa_rx.mutex, alsa_tx.mutex);
+
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         if (stream->activated) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "Stream was already activated");
@@ -677,6 +690,9 @@ public:
     )
     {
         (void)flags; (void)timeNs;
+
+        std::scoped_lock rx_lock(alsa_rx.mutex, alsa_tx.mutex);
+
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         if (!stream->activated) {
             SoapySDR_logf(SOAPY_SDR_ERROR, "Stream was already deactivated");
@@ -708,6 +724,8 @@ public:
         (void)timeNs;
         (void)timeoutUs; // TODO: timeout
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        std::scoped_lock lock(stream->mutex);
+
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
         snd_pcm_t *pcm = stream->pcm;
@@ -783,6 +801,8 @@ public:
         (void)timeNs;
         (void)timeoutUs; // TODO: timeout
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        std::scoped_lock lock(stream->mutex);
+
         if (!stream->is_tx())
             throw std::runtime_error("Wrong direction");
         snd_pcm_t *pcm = stream->pcm;
@@ -914,6 +934,9 @@ public:
     )
     {
         (void)direction; (void)channel;
+
+        std::scoped_lock lock(reg_mutex);
+
         if (rate != rate || rate <= 0)
             throw std::runtime_error("Sample rate must be positive");
 
@@ -955,6 +978,7 @@ public:
     ) const
     {
         (void)direction; (void)channel;
+        std::scoped_lock lock(reg_mutex);
         return sampleRate;
     }
 
@@ -970,6 +994,9 @@ public:
     )
     {
         (void)channel; (void)args;
+
+        std::scoped_lock lock(reg_mutex);
+
         const double step = masterClock * (1.0 / (double)(1L<<20));
         const uint32_t quantized = (uint32_t)scale_from_range(
             SoapySDR::Range(0, step * (double)((1L<<24)-1), step),
@@ -993,6 +1020,9 @@ public:
     ) const
     {
         (void)channel;
+
+        std::scoped_lock lock(reg_mutex);
+
         const double step = masterClock * (1.0 / (double)(1L<<20));
         if (direction == SOAPY_SDR_RX)
             return step * (
@@ -1049,6 +1079,8 @@ public:
         const double value
     )
     {
+        std::scoped_lock lock(reg_mutex);
+
         int32_t quantized = scale_from_range(getGainRange(direction, channel, name), value);
         if (direction == SOAPY_SDR_RX) {
             if (name == "LNA") {
@@ -1082,6 +1114,8 @@ public:
         const std::string & name
     ) const
     {
+        std::scoped_lock lock(reg_mutex);
+
         int32_t quantized = 0;
         if (direction == SOAPY_SDR_RX) {
             if (name == "LNA") {
@@ -1106,6 +1140,8 @@ public:
         const double value
     )
     {
+        std::scoped_lock lock(reg_mutex);
+
         if (direction == SOAPY_SDR_RX) {
             // Keep PGA gain around pga_gain_target over most of the
             // gain range while adjusting LNA gain over a wide range.
@@ -1126,6 +1162,8 @@ public:
 
     double getGain(const int dir, const size_t channel) const
     {
+        std::scoped_lock lock(reg_mutex);
+
         // Almost the same as the default method, but without
         // normalizing gains with their minimum value.
         // I am not sure if this is a good idea, since I do not
@@ -1173,6 +1211,8 @@ public:
     void setAntenna(const int direction, const size_t channel, const std::string &name)
     {
         (void)channel;
+        std::scoped_lock lock(reg_mutex);
+
         if (direction == SOAPY_SDR_RX) {
             if (name == "RX") {
                 // Disable loopback
@@ -1200,6 +1240,8 @@ public:
     std::string getAntenna(const int direction, const size_t channel) const
     {
         (void)channel;
+        std::scoped_lock lock(reg_mutex);
+
         if (direction == SOAPY_SDR_RX) {
             unsigned lb = get_cached_register_bits(0x10, 2, 2);
             if (lb & 2)
@@ -1258,6 +1300,7 @@ public:
     ) const
     {
         (void)name; // Ignore name since there's only one register bank
+        std::scoped_lock lock(reg_mutex);
 
         size_t transfer_len = length + 1;
         // Buffer for SPI transfer
@@ -1292,6 +1335,7 @@ public:
     )
     {
         (void)name; // Ignore name since there's only one register bank
+        std::scoped_lock lock(reg_mutex);
 
         for (size_t i = 0; i < value.size(); i++)
             set_register_bits(addr + i, 0, 8, value[i]);
@@ -1306,6 +1350,7 @@ public:
     )
     {
         (void)name;
+        std::scoped_lock lock(reg_mutex);
         set_register_bits(addr, 0, 8, value);
         write_registers_to_chip(addr, 1);
     }
