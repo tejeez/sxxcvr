@@ -20,7 +20,7 @@ import numpy as np
 def main(
     tx_freq = 433.9e6,
     dac_value = 1.0+1.0j,
-    tx_gain = 10.0,
+    tx_gain = 40.0,
     blocksize = 4096,
     loglevel = logging.WARNING,
     soapyloglevel = SoapySDR.SOAPY_SDR_INFO

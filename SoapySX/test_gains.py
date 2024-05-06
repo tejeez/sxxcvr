@@ -14,7 +14,7 @@ def main():
     SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_INFO)
     print('RX gain range:', device.getGainRange(SoapySDR.SOAPY_SDR_RX, 0))
     print('Automatically distributed RX gains:')
-    for gain in range(-10,80):
+    for gain in range(-10,90):
         device.setGain(SoapySDR.SOAPY_SDR_RX, 0, gain)
         gain_lna   = device.getGain(SoapySDR.SOAPY_SDR_RX, 0, 'LNA')
         gain_pga   = device.getGain(SoapySDR.SOAPY_SDR_RX, 0, 'PGA')
@@ -23,7 +23,7 @@ def main():
 
     print('TX gain range:', device.getGainRange(SoapySDR.SOAPY_SDR_TX, 0))
     print('Automatically distributed TX gains:')
-    for gain in range(-40,10):
+    for gain in range(-10,50):
         device.setGain(SoapySDR.SOAPY_SDR_TX, 0, gain)
         gain_dac   = device.getGain(SoapySDR.SOAPY_SDR_TX, 0, 'DAC')
         gain_mixer = device.getGain(SoapySDR.SOAPY_SDR_TX, 0, 'MIXER')

@@ -1060,14 +1060,11 @@ public:
     {
         (void)channel;
         if (direction == SOAPY_SDR_RX) {
-            // It's hard to decide which reference point to use for LNA gain values.
-            // This was chosen so that the most useful values of total gain
-            // are around 0-50 dB, somewhat similar to some other SDRs.
-            if (name == "LNA")   return {-12.0 , 36.0 , 6.0 };
+            if (name == "LNA")   return {  0.0 , 48.0 , 6.0 };
             if (name == "PGA")   return {  0.0 , 30.0 , 2.0 };
         } else {
             if (name == "DAC")   return {  0.0 ,  9.0 , 3.0 };
-            if (name == "MIXER") return {-37.5 , -7.5 , 2.0 };
+            if (name == "MIXER") return {  0.0 , 30.0 , 2.0 };
         }
         return {0, 0, 0};
     }
@@ -1153,39 +1150,11 @@ public:
         } else {
             // Not sure about best TX gain distribution yet.
             // Use similar logic as RX gains for now.
-            const double mixer_gain_target = -12.0;
+            const double mixer_gain_target = 26.0;
             setGain(direction, channel, "DAC", value - mixer_gain_target);
             double dac_gain = getGain(direction, channel, "DAC");
             setGain(direction, channel, "MIXER", value - dac_gain);
         }
-    }
-
-    double getGain(const int dir, const size_t channel) const
-    {
-        std::scoped_lock lock(reg_mutex);
-
-        // Almost the same as the default method, but without
-        // normalizing gains with their minimum value.
-        // I am not sure if this is a good idea, since I do not
-        // really know the reasoning behind the default method.
-        double gain = 0.0;
-        for (const auto &name : this->listGains(dir, channel))
-        {
-            gain += this->getGain(dir, channel, name);
-        }
-        return gain;
-    }
-
-    SoapySDR::Range getGainRange(const int dir, const size_t channel) const
-    {
-        double gain_min = 0.0, gain_max = 0.0;
-        for (const auto &name : this->listGains(dir, channel))
-        {
-            const auto r = this->getGainRange(dir, channel, name);
-            gain_min += r.minimum();
-            gain_max += r.maximum();
-        }
-        return SoapySDR::Range(gain_min, gain_max);
     }
 
 /***********************************************************************

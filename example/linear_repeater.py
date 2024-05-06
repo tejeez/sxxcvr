@@ -27,8 +27,8 @@ def init_sdr():
     dev.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, 432.55e6)
     dev.setFrequency(SoapySDR.SOAPY_SDR_TX, 0, 434.55e6)
 
-    dev.setGain(SoapySDR.SOAPY_SDR_RX, 0, 50.0)
-    dev.setGain(SoapySDR.SOAPY_SDR_TX, 0, 0.0)
+    dev.setGain(SoapySDR.SOAPY_SDR_RX, 0, 55.0)
+    dev.setGain(SoapySDR.SOAPY_SDR_TX, 0, 40.0)
 
     # Set transmitter enable threshold to 0 to keep transmitter always on.
     rx = dev.setupStream(SoapySDR.SOAPY_SDR_RX, SoapySDR.SOAPY_SDR_CF32, [0], {})
@@ -39,7 +39,6 @@ class FullDuplexIo:
     """Full duplex signal I/O using SoapySDR."""
     def __init__(self, device, rx_stream, tx_stream, buffer_samples = 256, latency_samples = 256*3):
         self.buf = np.zeros(buffer_samples, dtype=np.complex64)
-        #self.tx_start_buf = np.zeros(latency_samples, dtype=np.complex64)
         # Convert latency from samples to nanoseconds
         self.rx_tx_time_diff = int(round(latency_samples * 1e9 / SAMPLERATE))
         self.dev = device
