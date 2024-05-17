@@ -26,15 +26,10 @@ SoapySDRUtil --probe=driver=sx
 ```
 
 ## Features
-SoapySX does not currently support timestamps which are used by some
+SoapySX provides some support for timestamps which are used by some
 applications to obtain a known timing relationship between transmitted and
-received signals. SoapySX, however, provides an alternative method to
-synchronize receive and transmit streams by "linking" them together.
-When streams are linked, they start running at the same time.
-This behavior closely reflects that of the underlying ALSA API and its
-[snd_pcm_link feature](https://www.alsa-project.org/alsa-doc/alsa-lib/pcm.html#pcm_sync).
+received signals.
 See the
-[test_linked_streams](SoapySX/test_linked_streams.py)
-script or the
 [linear repeater example](example/linear_repeater.py)
-for examples on using this feature.
+for an example on using timestamps to obtain a constant, known latency
+from received to transmitted signal.
