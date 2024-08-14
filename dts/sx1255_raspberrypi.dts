@@ -18,7 +18,7 @@
 	compatible = "brcm,bcm2835";
 
 	fragment@0 {
-		target = <&i2s>;
+		target = <&i2s_clk_consumer>;
 		__overlay__ {
 			status = "okay";
 		};
@@ -54,7 +54,7 @@
 				frame-master = <&sac_codec_rx>;
 
 				sac_cpu_rx: cpu {
-					sound-dai = <&i2s>;
+					sound-dai = <&i2s_clk_consumer>;
 					dai-tdm-slot-num = <2>;
 					dai-tdm-slot-width = <32>;
 				};
@@ -68,7 +68,7 @@
 				frame-master = <&sac_codec_tx>;
 
 				sac_cpu_tx: cpu {
-					sound-dai = <&i2s>;
+					sound-dai = <&i2s_clk_consumer>;
 					dai-tdm-slot-num = <2>;
 					dai-tdm-slot-width = <32>;
 				};
