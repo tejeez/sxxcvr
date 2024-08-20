@@ -38,6 +38,11 @@ enum stream_mode {
     STREAM_MODE_LINK,
 };
 
+struct frontendCorrection {
+    std::complex<float> dc;
+    std::complex<float> iq;
+};
+
 // Clamp, offset, scale and quantize a value based on a SoapySDR::Range
 // and convert it to an integer.
 // The value is offset so that the minimum value becomes 0
@@ -86,36 +91,41 @@ static uint16_t get_hardware_version(void)
 
 // Convert raw received samples to CF32.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length)
+static inline void convert_rx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, struct frontendCorrection cor)
 {
-    const int32_t *src_ = (const int32_t*)src + src_offset*2;
-    float *dest_ = (float*)dest + dest_offset*2;
+    const std::complex<int32_t> *src_ = (const std::complex<int32_t>*)src + src_offset;
+    std::complex<float> *dest_ = (std::complex<float>*)dest + dest_offset;
     const float scaling = 1.0f / 0x80000000L;
-    for (size_t i = 0; i < length*2; i++)
+    const std::complex<float> scaling_conj = scaling * cor.iq;
+    const std::complex<float> scaled_dc = cor.dc * (1.0f / scaling);
+    for (size_t i = 0; i < length; i++)
     {
-        dest_[i] = scaling * (float)src_[i];
+        std::complex<float> converted = { (float)src_[i].real(), (float)src_[i].imag() };
+        converted += scaled_dc;
+        dest_[i] = scaling * converted + scaling_conj * std::conj(converted);
     }
 }
 
 // Convert CF32 to raw transmit samples.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2)
+static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2, struct frontendCorrection cor)
 {
-    const float *src_ = (const float*)src + src_offset*2;
-    int32_t *dest_ = (int32_t*)dest + dest_offset*2;
+    const std::complex<float> *src_ = (const std::complex<float>*)src + src_offset;
+    std::complex<int32_t> *dest_ = (std::complex<int32_t>*)dest + dest_offset;
     const float scaling = (float)0x7FFFFFFFL;
-    for (size_t i = 0; i < length*2; i+=2)
+    for (size_t i = 0; i < length; i++)
     {
-        float fi = src_[i], fq = src_[i+1];
-        int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
-        int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
+        std::complex<float> v = src_[i];
+        v = v + cor.iq * std::conj(v) + cor.dc;
+        int32_t vi = scaling * std::max(std::min(v.real(), 1.0f), -1.0f);
+        int32_t vq = scaling * std::max(std::min(v.imag(), 1.0f), -1.0f);
         // Second lowest bit of each "I" sample controls RX/TX switching.
         // Set the lowest bit to the same value just in case.
         // Let's also reserve the 2 lowest bits of "Q" samples
         // for future extensions and keep them as 0.
         vi &= 0xFFFFFFFCL;
         vq &= 0xFFFFFFFCL;
-        if (fi*fi + fq*fq >= tx_threshold2)
+        if (v.real()*v.real() + v.imag()*v.imag() >= tx_threshold2)
             vi |= 0b11L;
         dest_[i  ] = vi;
         dest_[i+1] = vq;
@@ -393,6 +403,9 @@ private:
     double masterClock;
     double sampleRate;
 
+    // RX and TX values for DC offset and I/Q balance correction
+    struct frontendCorrection correction[2];
+
     // Mutex for anything involving SX1255 registers
     // to avoid problems if an application calls methods from multiple threads.
     mutable std::recursive_mutex reg_mutex;
@@ -552,6 +565,7 @@ public:
     SoapySX(const SoapySDR::Kwargs &args, uint16_t hwversion):
         masterClock(32.0e6),
         sampleRate(125.0e3),
+        correction{{0, 0}, {0, 0}},
         // TODO: support custom SPIDEV path as an argument
         spi("/dev/spidev0.0"),
         gpio("gpiochip0"),
@@ -765,7 +779,7 @@ public:
                     ret,
                     pcm_areas->addr, pcm_areas->first, pcm_areas->step,
                     pcm_offset, pcm_frames);
-                convert_rx_buffer(pcm_areas->addr, pcm_offset, buffs[0], buff_offset, pcm_frames);
+                convert_rx_buffer(pcm_areas->addr, pcm_offset, buffs[0], buff_offset, pcm_frames, correction[SOAPY_SDR_RX]);
                 snd_pcm_sframes_t committed = snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
                 if (committed < 0) {
                     ret = (int)committed;
@@ -871,7 +885,7 @@ public:
                     ret,
                     pcm_areas->addr, pcm_areas->first, pcm_areas->step,
                     pcm_offset, pcm_frames);
-                convert_tx_buffer(buffs[0], buff_offset, pcm_areas->addr, pcm_offset, pcm_frames, tx_threshold2);
+                convert_tx_buffer(buffs[0], buff_offset, pcm_areas->addr, pcm_offset, pcm_frames, tx_threshold2, correction[SOAPY_SDR_TX]);
                 snd_pcm_sframes_t committed = snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
                 SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_commit: %ld", committed);
                 if (committed < 0) {
@@ -900,6 +914,54 @@ public:
         if (ret < 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
         return buff_offset;
+    }
+
+/***********************************************************************
+ * Frontend corrections
+ **********************************************************************/
+
+    bool hasDCOffset(const int direction, const size_t channel) const
+    {
+        (void)direction; (void)channel;
+        return true;
+    }
+
+    void setDCOffset(const int direction, const size_t channel, const std::complex<double> &offset)
+    {
+        (void)channel;
+        if (!(direction == SOAPY_SDR_RX || direction == SOAPY_SDR_TX))
+            return;
+        correction[direction].dc = offset;
+    }
+
+    std::complex<double> getDCOffset(const int direction, const size_t channel) const
+    {
+        (void)channel;
+        if (!(direction == SOAPY_SDR_RX || direction == SOAPY_SDR_TX))
+            return { 0.0f, 0.0f };
+        return correction[direction].dc;
+    }
+
+    bool hasIQBalance(const int direction, const size_t channel) const
+    {
+        (void)direction; (void)channel;
+        return true;
+    }
+
+    void setIQBalance(const int direction, const size_t channel, const std::complex<double> &balance)
+    {
+        (void)channel;
+        if (!(direction == SOAPY_SDR_RX || direction == SOAPY_SDR_TX))
+            return;
+        correction[direction].iq = balance;
+    }
+
+    virtual std::complex<double> getIQBalance(const int direction, const size_t channel) const
+    {
+        (void)channel;
+        if (!(direction == SOAPY_SDR_RX || direction == SOAPY_SDR_TX))
+            return { 0.0f, 0.0f };
+        return correction[direction].iq;
     }
 
 /***********************************************************************
