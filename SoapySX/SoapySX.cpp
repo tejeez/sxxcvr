@@ -127,8 +127,7 @@ static inline void convert_tx_buffer(const void *src, size_t src_offset, void *d
         vq &= 0xFFFFFFFCL;
         if (v.real()*v.real() + v.imag()*v.imag() >= tx_threshold2)
             vi |= 0b11L;
-        dest_[i  ] = vi;
-        dest_[i+1] = vq;
+        dest_[i] = std::complex<int32_t>{vi, vq};
     }
 }
 

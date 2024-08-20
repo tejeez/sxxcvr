@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+PLOT=True
+
+if PLOT:
+    import matplotlib.pyplot as plt
 import numpy as np
 import SoapySDR
 from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_TX, SOAPY_SDR_CF32
@@ -18,7 +22,7 @@ class Calibrator:
         self.tx_rx_bins = 576
         # Offset of transmitted tone from TX LO
         # FIXME: Seems like it's on the wrong frequency. Testing with DC for now
-        self.tx_tone_bins = 0  #128
+        self.tx_tone_bins = 128
         # Amplitude of transmitted tone
         self.tx_tone_amplitude = 0.5
 
@@ -72,6 +76,9 @@ class Calibrator:
         f = self.fft_scaling * np.fft.fft(
             self.fft_window *
             rx_signal[extra_before : extra_before+self.fftsize])
+
+        if PLOT:
+            plt.plot(np.abs(f))
         return {
             'RX_DC':    f[ 0],
             'TX_DC':    f[ self.tx_rx_bins],
@@ -91,6 +98,8 @@ def main():
     for i in range(4):
         a = calibrator.tx_rx_analyze()
         print_dict(a)
+    if PLOT:
+        plt.show()
     calibrator.dev.setDCOffset(SOAPY_SDR_RX, 0, -a['RX_DC'])
     calibrator.dev.setIQBalance(SOAPY_SDR_RX, 0, -a['RX_IMAGE'] / a['TX_TONE'])
     print('After calibration:')
