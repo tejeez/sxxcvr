@@ -585,6 +585,9 @@ public:
         // Put SX1255 to sleep
         set_register_bits(0, 0, 4, 0);
         write_registers_to_chip(0, 1);
+
+        // Make sure PA is turned off
+        writeSetting("PA", "OFF");
     }
 
 /***********************************************************************
@@ -1248,7 +1251,7 @@ public:
                 // PA always off
                 gpio_tx.set_value(0);
                 gpio_rx.set_value(1);
-            } else if (value == "AUTO") { // or would STREAM be a better name for the value?
+            } else if (value == "AUTO") {
                 // PA on/off controlled by TX stream (default)
                 gpio_tx.set_value(1);
                 gpio_rx.set_value(1);
