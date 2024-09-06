@@ -1349,6 +1349,34 @@ public:
         (void)direction; // Same for both directions
         return 1;
     }
+
+    std::string getNativeStreamFormat(
+        const int direction,
+        const size_t channel,
+        double &fullScale
+    ) const
+    {
+        (void)direction; (void)channel;
+        fullScale = 1.0;
+        // This is not really the "native" format
+        // but the only one currently supported.
+        return "CF32";
+    }
+
+    std::vector<std::string> getStreamFormats(const int direction, const size_t channel) const
+    {
+       (void)direction; (void)channel;
+        std::vector<std::string> streamFormats;
+        streamFormats.push_back("CF32");
+        return streamFormats;
+    }
+
+    bool hasHardwareTime(const std::string &what) const
+    {
+        if (what == "")
+            return true;
+        return false;
+    }
 };
 
 /***********************************************************************
