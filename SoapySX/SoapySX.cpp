@@ -264,6 +264,8 @@ public:
     bool setup_done;
     bool activated;
     int64_t position;
+    snd_pcm_uframes_t hwp_period_size;
+    snd_pcm_uframes_t hwp_buffer_size;
 
     AlsaPcm(const char *name, snd_pcm_stream_t dir):
         name(name),
@@ -272,7 +274,9 @@ public:
         stream_mode(STREAM_MODE_NORMAL),
         setup_done(0),
         activated(0),
-        position(0)
+        position(0),
+        hwp_period_size(0),
+        hwp_buffer_size(0)
     {
     }
 
@@ -329,8 +333,8 @@ public:
         // Period and buffer sizes could be made configurable
         // as a stream argument to let applications make
         // a tradeoff between latency and CPU usage.
-        snd_pcm_uframes_t hwp_period_size = 256;
-        snd_pcm_uframes_t hwp_buffer_size = 8192;
+        hwp_period_size = 256;
+        hwp_buffer_size = 8192;
 
         snd_pcm_uframes_t swp_boundary = 0;
 
@@ -715,6 +719,13 @@ public:
         return SOAPY_SDR_STREAM_ERROR;
     }
 
+    size_t getStreamMTU(SoapySDR::Stream * handle) const
+    {
+        auto *stream = reinterpret_cast<AlsaPcm *>(handle);
+        std::scoped_lock lock(stream->mutex);
+        return stream->hwp_period_size;
+    }
+
     int readStream(
         SoapySDR::Stream * handle,
         void *const * buffs,
@@ -724,13 +735,21 @@ public:
         const long timeoutUs
     )
     {
-        (void)timeNs;
-        (void)timeoutUs; // TODO: timeout
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
 
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
+
+        // If readStream is called before ALSA stream has been started,
+        // it will get stuck forever in snd_pcm_wait.
+        // Looks like this was the reason SoapyRemote did not work before.
+        // Proper implementation of timeout might fix this too but that
+        // might need replacing snd_pcm_wait with something more complicated.
+        // For now, handle it by returning if the stream is not active.
+        if (!stream->activated)
+            return 0;
+
         snd_pcm_t *pcm = stream->pcm;
 
         timeNs = samples_to_timestamp(stream->position);
@@ -779,8 +798,14 @@ public:
             }
 
             if (wait_for_more_samples) {
-                ret = snd_pcm_wait(pcm, -10001);
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_wait: %d", ret);
+                // TODO: handle timeout properly.
+                // This is a hack to make non-blocking read work.
+                if (timeoutUs > 0) {
+                    ret = snd_pcm_wait(pcm, -10001);
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_wait: %d", ret);
+                } else {
+                    break;
+                }
             }
         }
 
@@ -792,7 +817,7 @@ public:
         return buff_offset;
     }
 
-   int writeStream(
+    int writeStream(
         SoapySDR::Stream * handle,
         const void *const * buffs,
         const size_t numElems,
@@ -801,13 +826,15 @@ public:
         const long timeoutUs
     )
     {
-        (void)timeNs;
-        (void)timeoutUs; // TODO: timeout
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
         std::scoped_lock lock(stream->mutex);
 
         if (!stream->is_tx())
             throw std::runtime_error("Wrong direction");
+
+        if (!stream->activated)
+            return 0;
+
         snd_pcm_t *pcm = stream->pcm;
 
         if (flags & SOAPY_SDR_HAS_TIME) {
@@ -886,8 +913,14 @@ public:
             }
 
             if (wait_for_more_space) {
-                ret = snd_pcm_wait(pcm, -10001);
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_wait: %d", ret);
+                // TODO: handle timeout properly.
+                // This is a hack to make non-blocking write work.
+                if (timeoutUs > 0) {
+                    ret = snd_pcm_wait(pcm, -10001);
+                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_wait: %d", ret);
+                } else {
+                    break;
+                }
             }
         }
 
