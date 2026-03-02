@@ -9,6 +9,7 @@
 #include <cassert>
 #include <chrono>
 #include <fstream>
+#include <optional>
 #include <thread>
 #include <mutex>
 
@@ -404,7 +405,16 @@ private:
 
     Spi spi;
     gpiod::chip gpio;
-    gpiod::line gpio_reset, gpio_rx, gpio_tx;
+
+    // GPIO line offsets (libgpiod v2: offsets stored separately, one request manages all)
+    gpiod::line::offset offset_reset;
+    gpiod::line::offset offset_rx;
+    gpiod::line::offset offset_tx;
+    // Single line_request managing all three GPIO lines.
+    // Wrapped in optional because line_request has no default constructor
+    // and can only be created via chip::prepare_request().do_request()
+    std::optional<gpiod::line_request> gpio_lines;
+
     AlsaPcm alsa_rx;
     AlsaPcm alsa_tx;
 
@@ -472,30 +482,35 @@ private:
     void init_gpio(void)
     {
         SoapySDR_logf(SOAPY_SDR_DEBUG, "Requesting GPIO lines");
-        gpio_reset.request({
-            .consumer = "SX reset",
-            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
-            .flags = gpiod::line_request::FLAG_OPEN_SOURCE
-        }, 0);
-        gpio_rx.request({
-            .consumer = "SX RX",
-            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
-            .flags = 0
-        }, 1);
-        gpio_tx.request({
-            .consumer = "SX TX",
-            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
-            .flags = 0
-        }, 1);
+
+        // libgpiod v2: configure output settings for reset line (open-source drive)
+        gpiod::line_settings reset_settings;
+        reset_settings.set_direction(gpiod::line::direction::OUTPUT);
+        reset_settings.set_drive(gpiod::line::drive::OPEN_SOURCE);
+        reset_settings.set_output_value(gpiod::line::value::INACTIVE);
+
+        // RX and TX lines: standard push-pull output, initially active (high)
+        gpiod::line_settings rxtx_settings;
+        rxtx_settings.set_direction(gpiod::line::direction::OUTPUT);
+        rxtx_settings.set_output_value(gpiod::line::value::ACTIVE);
+
+        gpiod::line_config cfg;
+        cfg.add_line_settings({offset_reset}, reset_settings);
+        cfg.add_line_settings({offset_rx, offset_tx}, rxtx_settings);
+
+        gpio_lines.emplace(gpio.prepare_request()
+            .set_consumer("SoapySX")
+            .set_line_config(cfg)
+            .do_request());
     }
 
     void reset_chip(void)
     {
         SoapySDR_logf(SOAPY_SDR_DEBUG, "Resetting chip");
         // Timing from datasheet Figure 6-2: Manual Reset Timing Diagram
-        gpio_reset.set_value(1);
+        gpio_lines->set_value(offset_reset, gpiod::line::value::ACTIVE);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        gpio_reset.set_value(0);
+        gpio_lines->set_value(offset_reset, gpiod::line::value::INACTIVE);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
@@ -555,10 +570,11 @@ public:
         sampleRate(125.0e3),
         // TODO: support custom SPIDEV path as an argument
         spi("/dev/spidev0.0"),
-        gpio("gpiochip0"),
-        gpio_reset(gpio.get_line(5)),
-        gpio_rx(gpio.get_line(hwversion == 0x0100 ? 13 : 23)),
-        gpio_tx(gpio.get_line(hwversion == 0x0100 ? 12 : 22)),
+        gpio("/dev/gpiochip0"),
+        // libgpiod v2: store offsets, gpio_lines initialized in init_gpio()
+        offset_reset(5),
+        offset_rx(hwversion == 0x0100 ? 13 : 23),
+        offset_tx(hwversion == 0x0100 ? 12 : 22),
         alsa_rx(AlsaPcm("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE)),
         alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
         tx_threshold2(0.0f),
@@ -654,7 +670,8 @@ public:
     void closeStream(SoapySDR::Stream * handle)
     {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
-        std::scoped_lock(stream->mutex);
+        // Fixed: give the scoped_lock a name so it actually holds the lock
+        std::scoped_lock lock(stream->mutex);
         stream->setup_done = 0;
     }
 
@@ -1309,16 +1326,16 @@ public:
         if (key == "PA") {
             if (value == "ON") {
                 // PA always on
-                gpio_tx.set_value(1);
-                gpio_rx.set_value(0);
+                gpio_lines->set_value(offset_tx, gpiod::line::value::ACTIVE);
+                gpio_lines->set_value(offset_rx, gpiod::line::value::INACTIVE);
             } else if (value == "OFF") {
                 // PA always off
-                gpio_tx.set_value(0);
-                gpio_rx.set_value(1);
+                gpio_lines->set_value(offset_tx, gpiod::line::value::INACTIVE);
+                gpio_lines->set_value(offset_rx, gpiod::line::value::ACTIVE);
             } else if (value == "AUTO") {
                 // PA on/off controlled by TX stream (default)
-                gpio_tx.set_value(1);
-                gpio_rx.set_value(1);
+                gpio_lines->set_value(offset_tx, gpiod::line::value::ACTIVE);
+                gpio_lines->set_value(offset_rx, gpiod::line::value::ACTIVE);
             }
         }
     }
