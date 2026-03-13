@@ -16,11 +16,11 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/types.h>
+#include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 
 #include <alsa/asoundlib.h>
 #include <alsa/control.h>
-#include <gpiod.hpp>
 
 // Streaming mode, affecting how starting, stopping, overruns and underruns
 // are handled.
@@ -249,6 +249,79 @@ public:
 };
 
 
+
+// Similar to class Spi, but for GPIO pins.
+class GpioChip {
+public:
+    int chip_fd;
+
+    GpioChip(const char *gpiochip_path)
+    {
+        assert(gpiochip_path != NULL);
+        chip_fd = open(gpiochip_path, O_RDWR);
+        if (chip_fd < 0) {
+            throw std::runtime_error("Failed to open GPIO");
+        }
+    }
+
+    ~GpioChip()
+    {
+        close(chip_fd);
+    }
+};
+
+class GpioLine {
+public:
+    int line_fd;
+
+    GpioLine(class GpioChip &chip, __u32 pin_number, const char *name, __u64 flags, bool initial_value)
+    {
+        struct gpio_v2_line_request req = {
+            .offsets = { pin_number },
+            .consumer = "",
+            .config = (struct gpio_v2_line_config) {
+                .flags = flags,
+                .num_attrs = 0,
+                .padding = { },
+                .attrs = { },
+            },
+            .num_lines = 1,
+            .event_buffer_size = 0,
+            .padding = { },
+            .fd = 0,
+        };
+        strncpy(req.consumer, name, GPIO_MAX_NAME_SIZE-1);
+
+        int ret = ioctl(chip.chip_fd, GPIO_V2_GET_LINE_IOCTL, &req);
+        if (ret < 0) {
+            throw std::runtime_error("Failed to request GPIO line");
+        }
+
+        line_fd = req.fd;
+
+        set_value(initial_value);
+    }
+
+    ~GpioLine()
+    {
+        close(line_fd);
+    }
+
+    void set_value(bool value)
+    {
+        struct gpio_v2_line_values val = {
+            .bits = value,
+            .mask = 1,
+        };
+        int ret = ioctl(line_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &val);
+        if (ret < 0) {
+            throw std::runtime_error("Failed to write GPIO line");
+        }
+    }
+};
+
+
+
 #define ALSACHECK(a) do {\
 int retcheck = (a); \
 if (retcheck < 0) { \
@@ -403,8 +476,8 @@ private:
     mutable std::recursive_mutex reg_mutex;
 
     Spi spi;
-    gpiod::chip gpio;
-    gpiod::line gpio_reset, gpio_rx, gpio_tx;
+    GpioChip gpio;
+    GpioLine gpio_reset, gpio_rx, gpio_tx;
     AlsaPcm alsa_rx;
     AlsaPcm alsa_tx;
 
@@ -467,26 +540,6 @@ private:
             buf[i] = regs[firstreg + i - 1];
 
         spi.transfer(buf, buf);
-    }
-
-    void init_gpio(void)
-    {
-        SoapySDR_logf(SOAPY_SDR_DEBUG, "Requesting GPIO lines");
-        gpio_reset.request({
-            .consumer = "SX reset",
-            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
-            .flags = gpiod::line_request::FLAG_OPEN_SOURCE
-        }, 0);
-        gpio_rx.request({
-            .consumer = "SX RX",
-            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
-            .flags = 0
-        }, 1);
-        gpio_tx.request({
-            .consumer = "SX TX",
-            .request_type = gpiod::line_request::DIRECTION_OUTPUT,
-            .flags = 0
-        }, 1);
     }
 
     void reset_chip(void)
@@ -553,12 +606,29 @@ public:
     SoapySX(const SoapySDR::Kwargs &args, uint16_t hwversion):
         masterClock(32.0e6),
         sampleRate(125.0e3),
-        // TODO: support custom SPIDEV path as an argument
+
         spi("/dev/spidev0.0"),
-        gpio("gpiochip0"),
-        gpio_reset(gpio.get_line(5)),
-        gpio_rx(gpio.get_line(hwversion == 0x0100 ? 13 : 23)),
-        gpio_tx(gpio.get_line(hwversion == 0x0100 ? 12 : 22)),
+
+        gpio("/dev/gpiochip0"),
+        gpio_reset(gpio,
+            5,
+            "SX reset",
+            GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_OPEN_SOURCE,
+            0
+        ),
+        gpio_rx(gpio,
+            hwversion == 0x0100 ? 13 : 23,
+            "SX RX",
+            GPIO_V2_LINE_FLAG_OUTPUT,
+            1
+        ),
+        gpio_tx(gpio,
+            hwversion == 0x0100 ? 12 : 22,
+            "SX TX",
+            GPIO_V2_LINE_FLAG_OUTPUT,
+            1
+        ),
+
         alsa_rx(AlsaPcm("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE)),
         alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
         tx_threshold2(0.0f),
@@ -569,7 +639,6 @@ public:
 
         SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapySX");
 
-        init_gpio();
         reset_chip();
         init_chip();
         detect_clock();
@@ -738,6 +807,11 @@ public:
         if (stream->is_tx())
             throw std::runtime_error("Wrong direction");
 
+        snd_pcm_t *pcm = stream->pcm;
+
+        timeNs = samples_to_timestamp(stream->position);
+        flags = SOAPY_SDR_HAS_TIME;
+
         // If readStream is called before ALSA stream has been started,
         // it will get stuck forever in snd_pcm_wait.
         // Looks like this was the reason SoapyRemote did not work before.
@@ -746,11 +820,6 @@ public:
         // For now, handle it by returning if the stream is not active.
         if (!stream->activated)
             return 0;
-
-        snd_pcm_t *pcm = stream->pcm;
-
-        timeNs = samples_to_timestamp(stream->position);
-        flags = SOAPY_SDR_HAS_TIME;
 
         int ret = 0;
         size_t buff_offset = 0;

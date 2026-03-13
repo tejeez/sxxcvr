@@ -2,7 +2,7 @@
 
 Install dependencies:
 ```
-sudo apt-get install --no-install-recommends git make g++ cmake libsoapysdr-dev libasound2-dev libgpiod-dev soapysdr-tools python3-soapysdr
+sudo apt-get install --no-install-recommends git make g++ cmake libsoapysdr-dev libasound2-dev soapysdr-tools python3-soapysdr
 ```
 
 Some prototype boards do not have the HAT identification EEPROM written.
