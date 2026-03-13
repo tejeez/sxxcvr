@@ -401,14 +401,42 @@ public:
         snd_pcm_sw_params_t *swp = NULL;
 
         unsigned int hwp_periods = 0;
-        // Period sizes smaller than 64 did not seem to work well
-        // in some tests. A higher period size somewhat reduces
-        // CPU use at the cost of increased minimum latency.
-        // Period and buffer sizes could be made configurable
-        // as a stream argument to let applications make
-        // a tradeoff between latency and CPU usage.
-        hwp_period_size = 256;
-        hwp_buffer_size = 65536;
+
+        // Period size basically determines the I2S DMA interrupt rate.
+        // A higher period size somewhat reduces CPU use
+        // but increases the minimum latency.
+        // If an application reads samples in fixed size blocks,
+        // it is usually best to use a period a size equal to the block size
+        // to minimize latency while avoiding unnecessary CPU use.
+        //
+        // TODO: make period size configurable as a stream argument or a device argument.
+        // It would be make more sense as a stream argument, but
+        // making it a stream argument would need rearranging some initialization code.
+        // Device argument might be fine too.
+        if (hwp_period_size == 0) {
+            // Use default value.
+            // tetra-bluestation, one of the most important SXceiver applications,
+            // currently reads samples in blocks of 900.
+            // Use that as a default for testing purposes.
+            // It should be really made to pass it as an argument
+            // once that has been implemented.
+            hwp_period_size = 900;
+        }
+        // Based on some tests requesting various period and buffer sizes,
+        // it seems like, on a Raspberry Pi:
+        // * Maximum buffer size is 65536.
+        // * Buffer size should be a multiple of period size.
+        //   Otherwise ALSA forces period size to be a submultiple of buffer size.
+        // * There should be at least 2 periods per buffer, but we do not really need
+        //   to check for this. ALSA handles it nicely.
+        // * Minimum period size is 2 but this does not really need
+        //   a separate check either.
+        // Given these constraints, find the maximum possible buffer size
+        // to achieve the period requested.
+        const snd_pcm_uframes_t max_buffer_size = 65536;
+        hwp_period_size = std::min(hwp_period_size, max_buffer_size);
+        hwp_buffer_size = max_buffer_size / hwp_period_size * hwp_period_size;
+
 
         snd_pcm_uframes_t swp_boundary = 0;
 
