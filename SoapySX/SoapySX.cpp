@@ -932,6 +932,28 @@ public:
             length = pcm_avail;
         }
 
+        // If number of available samples is more than the ALSA buffer size,
+        // it means the buffer has overrun and old samples have been overwritten.
+        // Skip these samples.
+        // TODO: do this for mmap interface too, but that is not a high priority now
+        // because it might be simpler to just remove mmap support and make things simpler.
+        if (pcm_avail > (snd_pcm_sframes_t)stream->hwp_buffer_size) {
+            snd_pcm_uframes_t overwritten = (snd_pcm_uframes_t)pcm_avail - stream->hwp_buffer_size;
+            // Round the number of samples to skip to a multiple of period size,
+            // so applications that use reads aligned to periods will stay aligned.
+            // Add 1-2 extra periods for some margin.
+            snd_pcm_uframes_t samples_to_skip = (overwritten / stream->hwp_period_size + 2) * stream->hwp_period_size;
+            snd_pcm_sframes_t forwarded = snd_pcm_forward(pcm, samples_to_skip);
+            if (forwarded > 0) {
+                stream->position += forwarded;
+                // Update timestamp accordingly.
+                // TODO: rearrange code so that this is not needed here
+                timeNs = samples_to_timestamp(stream->position);
+
+                SoapySDR_logf(SOAPY_SDR_WARNING, "RX buffer overrun. Skipped %u samples", forwarded);
+            }
+        }
+
         ret = snd_pcm_readi(pcm, buffer_rx.data(), length);
         if (ret < 0)
             goto fail;
