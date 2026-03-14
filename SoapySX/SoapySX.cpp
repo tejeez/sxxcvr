@@ -393,7 +393,7 @@ public:
         return ret;
     }
 
-    void configure()
+    void configure(snd_pcm_uframes_t period)
     {
         if (pcm == NULL)
             return;
@@ -408,20 +408,10 @@ public:
         // If an application reads samples in fixed size blocks,
         // it is usually best to use a period a size equal to the block size
         // to minimize latency while avoiding unnecessary CPU use.
-        //
-        // TODO: make period size configurable as a stream argument or a device argument.
-        // It would be make more sense as a stream argument, but
-        // making it a stream argument would need rearranging some initialization code.
-        // Device argument might be fine too.
-        if (hwp_period_size == 0) {
-            // Use default value.
-            // tetra-bluestation, one of the most important SXceiver applications,
-            // currently reads samples in blocks of 900.
-            // Use that as a default for testing purposes.
-            // It should be really made to pass it as an argument
-            // once that has been implemented.
-            hwp_period_size = 900;
-        }
+        // Period size can configured using the "period" stream argument.
+        // Use default value if 0.
+        hwp_period_size = period > 0 ? period : 256;
+
         // Based on some tests requesting various period and buffer sizes,
         // it seems like, on a Raspberry Pi:
         // * Maximum buffer size is 65536.
@@ -751,13 +741,13 @@ public:
         bool arg_link = (args.count("link") > 0 && args.at("link") == "1");
         stream->stream_mode = arg_link ? STREAM_MODE_LINK : STREAM_MODE_NORMAL;
 
-        stream->configure();
+        stream->configure(args.count("period") > 0 ? std::stoul(args.at("period")) : 0);
 
         stream->setup_done = 1;
 
         // Always link RX and TX PCMs if both have been setup.
         if ((!linked) && alsa_rx.setup_done && alsa_tx.setup_done) {
-            SoapySDR_logf(SOAPY_SDR_INFO, "Linking streams");
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "Linking streams");
             ALSACHECK(snd_pcm_link(alsa_rx.pcm, alsa_tx.pcm));
             linked = 1;
         }
