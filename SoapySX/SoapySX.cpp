@@ -667,10 +667,10 @@ public:
         regs{0}
 
 #ifndef USE_MMAP
-        // Allocate "big enough" buffers in the beginning
-        // to avoid repeated memory allocations.
-        ,buffer_rx(65536)
-        ,buffer_tx(65536)
+        // Allocate reasonably large buffers by default.
+        // Their size will be increased if needed.
+        ,buffer_rx(8192)
+        ,buffer_tx(8192)
 #endif
     {
         (void)args;
@@ -761,7 +761,7 @@ public:
     void closeStream(SoapySDR::Stream * handle)
     {
         auto *stream = reinterpret_cast<AlsaPcm *>(handle);
-        std::scoped_lock(stream->mutex);
+        std::scoped_lock lock(stream->mutex);
         stream->setup_done = 0;
     }
 
@@ -923,15 +923,6 @@ public:
         if (ret < 0)
             goto fail;
 
-        if (length > buffer_rx.size())
-            length = buffer_rx.size();
-
-        if (timeoutUs <= 0 && pcm_avail < (snd_pcm_sframes_t)length) {
-            // Hack to make non-blocking read work:
-            // limit number of samples to what is available right now.
-            length = pcm_avail;
-        }
-
         // If number of available samples is more than the ALSA buffer size,
         // it means the buffer has overrun and old samples have been overwritten.
         // Skip these samples.
@@ -946,6 +937,7 @@ public:
             snd_pcm_sframes_t forwarded = snd_pcm_forward(pcm, samples_to_skip);
             if (forwarded > 0) {
                 stream->position += forwarded;
+                pcm_avail -= forwarded;
                 // Update timestamp accordingly.
                 // TODO: rearrange code so that this is not needed here
                 timeNs = samples_to_timestamp(stream->position);
@@ -954,9 +946,28 @@ public:
             }
         }
 
-        ret = snd_pcm_readi(pcm, buffer_rx.data(), length);
-        if (ret < 0)
-            goto fail;
+        if (timeoutUs <= 0) {
+            // Hack to make non-blocking read work:
+            // limit number of samples to what is available right now.
+            if (pcm_avail <= 0) {
+                length = 0;
+            } else if ((snd_pcm_uframes_t)pcm_avail < length) {
+                length = (snd_pcm_uframes_t)pcm_avail;
+            }
+        }
+
+        if (length > buffer_rx.size())
+            buffer_rx.resize(length);
+
+        if (length > 0) {
+            ret = snd_pcm_readi(pcm, buffer_rx.data(), length);
+            if (ret < 0)
+                goto fail;
+        } else {
+            // Not sure what happens if 0 is given as a length to snd_pcm_readi,
+            // so skip the call just in case.
+            ret = 0;
+        }
 
         convert_rx_buffer(buffer_rx.data(), 0, buffs[0], 0, ret);
 
@@ -1094,16 +1105,33 @@ fail:
 #else
         int ret = 0;
         snd_pcm_uframes_t length = numElems;
-        if (length > buffer_tx.size())
-            length = buffer_tx.size();
 
-        // TODO handle non-blocking write
+        if (timeoutUs <= 0) {
+            // Hack to make non-blocking write work:
+            // limit number of samples to the amount of space in the buffer now.
+
+            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
+            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
+            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
+
+            if (pcm_avail <= 0) {
+                length = 0;
+            } else if ((snd_pcm_uframes_t)pcm_avail < length) {
+                length = (snd_pcm_uframes_t)pcm_avail;
+            }
+        }
+
+        if (length > buffer_tx.size())
+            buffer_tx.resize(length);
 
         convert_tx_buffer(buffs[0], 0, buffer_tx.data(), 0, length, tx_threshold2);
-        ret = snd_pcm_writei(pcm, buffer_tx.data(), length);
-        if (ret < 0)
-            goto fail;
-        stream->position += ret;
+
+        if (length > 0) {
+            ret = snd_pcm_writei(pcm, buffer_tx.data(), length);
+            if (ret < 0)
+                goto fail;
+            stream->position += ret;
+        }
 
 fail:
         #endif
