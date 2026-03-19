@@ -997,10 +997,11 @@ public:
             // It might be more "correct" to return SOAPY_SDR_TIME_ERROR instead,
             // but seems like discarding is a common behavior with other SDRs, so
             // I am worried some applications might not properly handle the error code.
-            if (playback_position - write_position > 0) {
-                // Timestamp in the past.
+            int64_t diff = playback_position - write_position;
+            if (diff > 0) {
+                // Timestamp is in the past.
                 // Do nothing but pretend all samples were written.
-                SoapySDR_logf(SOAPY_SDR_WARNING, "Discarding TX %d samples in the past", playback_position - write_position);
+                SoapySDR_logf(SOAPY_SDR_WARNING, "Discarding TX %d samples in the past", diff);
                 return (int)length;
             }
         } else {
@@ -1013,7 +1014,9 @@ public:
             // Add 1-2 extra periods for some margin.
             int64_t diff = playback_position - write_position;
             if (diff > 0) {
-                write_position += (diff / (int64_t)stream->hwp_period_size + 2) * (int64_t)stream->hwp_period_size;
+                diff = (diff / (int64_t)stream->hwp_period_size + 2) * (int64_t)stream->hwp_period_size;
+                write_position += diff;
+                SoapySDR_logf(SOAPY_SDR_WARNING, "TX buffer underrun. Forwarding TX stream by %d samples", diff);
             }
         }
 
