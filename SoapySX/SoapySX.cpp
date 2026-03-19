@@ -589,7 +589,8 @@ private:
         } else if (tunes_high && (!tunes_low)) {
             SoapySDR_logf(SOAPY_SDR_INFO, "Detected clock as 32.0 MHz");
         } else {
-            SoapySDR_logf(SOAPY_SDR_INFO, "Clock detection failed, assuming 32.0 MHz");
+            SoapySDR_logf(SOAPY_SDR_INFO, "Clock detection failed, assuming 38.4 MHz");
+            masterClock = 38.4e6;
         }
 
         // Update default values for new masterClock value
