@@ -45,12 +45,3 @@ option(INSTALL_PIPEWIRE_CONF "Install PipeWire configuration to prevent it from 
 if (INSTALL_PIPEWIRE_CONF)
 install(FILES 60-pipewire-do-not-use-i2s.lua DESTINATION /usr/share/wireplumber/main.lua.d/)
 endif (INSTALL_PIPEWIRE_CONF)
-
-########################################################################
-# Options
-########################################################################
-
-option(USE_MMAP "Use ALSA memory mapped interface. This avoid one memory copy but actually seems to increase overhead due to a more complex interface requiring more syscalls to use." OFF)
-if (USE_MMAP)
-add_definitions(-DUSE_MMAP)
-endif (USE_MMAP)

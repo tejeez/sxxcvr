@@ -432,11 +432,7 @@ public:
 
         ALSACHECK(snd_pcm_hw_params_malloc(&hwp));
         ALSACHECK(snd_pcm_hw_params_any(pcm, hwp));
-#ifdef USE_MMAP
-        ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, SND_PCM_ACCESS_MMAP_INTERLEAVED));
-#else
         ALSACHECK(snd_pcm_hw_params_set_access(pcm, hwp, SND_PCM_ACCESS_RW_INTERLEAVED));
-#endif
         ALSACHECK(snd_pcm_hw_params_set_format(pcm, hwp, SND_PCM_FORMAT_S32_LE));
         // Sample rate given to ALSA does not affect the actual sample rate,
         // so just use a fixed "dummy" value.
@@ -515,14 +511,12 @@ private:
     // from the chip every time.
     uint8_t regs[MAX_REGS];
 
-#ifndef USE_MMAP
     // Buffer for RX samples before type conversion.
     // Data is not actually uint64_t but it simplifies code a bit
     // by making one vector element correspond to one 32+32 bit complex sample.
     std::vector<uint64_t> buffer_rx;
     // Buffer for TX samples after type conversion.
     std::vector<uint64_t> buffer_tx;
-#endif
 
     // Convert a SoapySDR nanosecond timestamp to a sample counter.
     int64_t timestamp_to_samples(long long timestamp) const
@@ -666,12 +660,10 @@ public:
         linked(false),
         regs{0}
 
-#ifndef USE_MMAP
         // Allocate reasonably large buffers by default.
         // Their size will be increased if needed.
         ,buffer_rx(8192)
         ,buffer_tx(8192)
-#endif
     {
         (void)args;
 
@@ -859,61 +851,6 @@ public:
         if (!stream->activated)
             return 0;
 
-#if USE_MMAP
-        int ret = 0;
-        size_t buff_offset = 0;
-        while (buff_offset < numElems) {
-            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
-            if (ret < 0)
-                break;
-
-            bool wait_for_more_samples = 0;
-            // Number of samples to read
-            size_t n = numElems - buff_offset;
-            if (pcm_avail < 0) {
-                n = 0;
-                wait_for_more_samples = 1;
-            } else if ((size_t)pcm_avail < n) {
-                n = (size_t)pcm_avail;
-                wait_for_more_samples = 1;
-            }
-
-            if (n > 0) {
-                const snd_pcm_channel_area_t *pcm_areas = NULL;
-                snd_pcm_uframes_t pcm_offset = 0, pcm_frames = n;
-                ret = snd_pcm_mmap_begin(pcm, &pcm_areas, &pcm_offset, &pcm_frames);
-                if (ret < 0) {
-                    SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_mmap_begin: %d", ret);
-                    break;
-                }
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_mmap_begin: %d   %ld %d %d   %ld %ld",
-                    ret,
-                    pcm_areas->addr, pcm_areas->first, pcm_areas->step,
-                    pcm_offset, pcm_frames);
-                convert_rx_buffer(pcm_areas->addr, pcm_offset, buffs[0], buff_offset, pcm_frames);
-                snd_pcm_sframes_t committed = snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
-                if (committed < 0) {
-                    ret = (int)committed;
-                    break;
-                }
-                buff_offset += committed;
-                stream->position += committed;
-            }
-
-            if (wait_for_more_samples) {
-                // TODO: handle timeout properly.
-                // This is a hack to make non-blocking read work.
-                if (timeoutUs > 0) {
-                    ret = snd_pcm_wait(pcm, -10001);
-                    SoapySDR_logf(SOAPY_SDR_DEBUG, "rx snd_pcm_wait: %d", ret);
-                } else {
-                    break;
-                }
-            }
-        }
-#else
         int ret = 0;
         snd_pcm_uframes_t length = numElems;
         snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
@@ -926,8 +863,6 @@ public:
         // If number of available samples is more than the ALSA buffer size,
         // it means the buffer has overrun and old samples have been overwritten.
         // Skip these samples.
-        // TODO: do this for mmap interface too, but that is not a high priority now
-        // because it might be simpler to just remove mmap support and make things simpler.
         if (pcm_avail > (snd_pcm_sframes_t)stream->hwp_buffer_size) {
             snd_pcm_uframes_t overwritten = (snd_pcm_uframes_t)pcm_avail - stream->hwp_buffer_size;
             // Round the number of samples to skip to a multiple of period size,
@@ -974,18 +909,12 @@ public:
         stream->position += ret;
 
 fail:
-#endif
-
         if (ret == -EPIPE) // Overrun error
             return SOAPY_SDR_OVERFLOW;
         if (ret < 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
 
-#ifdef USE_MMAP
-        return buff_offset;
-#else
         return ret;
-#endif
     }
 
     int writeStream(
@@ -1040,69 +969,6 @@ fail:
             }
         }
 
-#ifdef USE_MMAP
-        int ret = 0;
-        size_t buff_offset = 0;
-        while (buff_offset < numElems) {
-            snd_pcm_sframes_t pcm_avail = 0, pcm_delay = 0;
-            ret = snd_pcm_avail_delay(pcm, &pcm_avail, &pcm_delay);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_avail_delay: %d %ld %ld", ret, pcm_avail, pcm_delay);
-            if (ret < 0)
-                break;
-
-            bool wait_for_more_space = 0;
-            // Number of samples to write
-            size_t n = numElems - buff_offset;
-            if (pcm_avail < 0) {
-                n = 0;
-                wait_for_more_space = 1;
-            } else if ((size_t)pcm_avail < n) {
-                n = (size_t)pcm_avail;
-                wait_for_more_space = 1;
-            }
-
-            if (n > 0) {
-                const snd_pcm_channel_area_t *pcm_areas = NULL;
-                snd_pcm_uframes_t pcm_offset = 0, pcm_frames = n;
-                ret = snd_pcm_mmap_begin(pcm, &pcm_areas, &pcm_offset, &pcm_frames);
-                if (ret < 0) {
-                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_begin: %d", ret);
-                    break;
-                }
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_begin: %d   %ld %d %d   %ld %ld",
-                    ret,
-                    pcm_areas->addr, pcm_areas->first, pcm_areas->step,
-                    pcm_offset, pcm_frames);
-                convert_tx_buffer(buffs[0], buff_offset, pcm_areas->addr, pcm_offset, pcm_frames, tx_threshold2);
-                snd_pcm_sframes_t committed = snd_pcm_mmap_commit(pcm, pcm_offset, pcm_frames);
-                SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_mmap_commit: %ld", committed);
-                if (committed < 0) {
-                    ret = (int)committed;
-                    break;
-                }
-                buff_offset += committed;
-                stream->position += committed;
-            }
-
-            if (wait_for_more_space) {
-                // TODO: handle timeout properly.
-                // This is a hack to make non-blocking write work.
-                if (timeoutUs > 0) {
-                    ret = snd_pcm_wait(pcm, -10001);
-                    SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_wait: %d", ret);
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // mmap_commit does not automatically start a stream like a write does,
-        // so start it here if needed.
-        if (ret >= 0 && snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED) {
-            ret = snd_pcm_start(pcm);
-            SoapySDR_logf(SOAPY_SDR_DEBUG, "tx snd_pcm_start: %d", ret);
-        }
-#else
         int ret = 0;
         snd_pcm_uframes_t length = numElems;
 
@@ -1134,16 +1000,11 @@ fail:
         }
 
 fail:
-        #endif
         if (ret == -EPIPE) // Underrun error
             return SOAPY_SDR_UNDERFLOW;
         if (ret < 0) // Some other error
             return SOAPY_SDR_STREAM_ERROR;
-#ifdef USE_MMAP
-        return buff_offset;
-#else
         return ret;
-#endif
     }
 
     long long getHardwareTime(const std::string &what) const
