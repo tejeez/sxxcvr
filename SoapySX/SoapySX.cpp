@@ -617,7 +617,7 @@ private:
         setFrequency(SOAPY_SDR_RX, 0, frequency, {});
         setFrequency(SOAPY_SDR_TX, 0, frequency, {});
         // Give some time for PLL to lock
-        usleep(1000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         auto status_register = readRegister("", 0x11);
         return (status_register & 3) == 3;
     }
