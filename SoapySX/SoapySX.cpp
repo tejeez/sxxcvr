@@ -23,6 +23,9 @@
 #include <alsa/asoundlib.h>
 #include <alsa/control.h>
 
+extern const char *SoapySX_tag;
+extern const char *SoapySX_commit;
+
 // Streaming mode, affecting how starting, stopping, overruns and underruns
 // are handled.
 enum stream_mode {
@@ -68,22 +71,31 @@ static uint16_t read_hex_file(const char *filename)
     return std::stoul(str, NULL, 16);
 }
 
-static uint16_t get_hardware_version(void)
+struct hat_info {
+    uint16_t product_id;
+    uint16_t product_ver;
+    bool read_success;
+};
+
+static struct hat_info read_hat_info(void)
 {
     const uint16_t product_id_expected = 0x1255;
     // Default assumption if ID cannot be read
-    uint16_t product_id = product_id_expected, product_ver = 0x0101;
+    struct hat_info info = { product_id_expected, 0x0101, false };
     try {
-        product_id  = read_hex_file("/proc/device-tree/hat/product_id");
-        product_ver = read_hex_file("/proc/device-tree/hat/product_ver");
-        SoapySDR_logf(SOAPY_SDR_INFO, "Hardware version %d.%d", product_ver >> 8, product_ver & 0xFF);
+        info.product_id  = read_hex_file("/proc/device-tree/hat/product_id");
+        info.product_ver = read_hex_file("/proc/device-tree/hat/product_ver");
+        info.read_success = true;
+        SoapySDR_logf(SOAPY_SDR_INFO, "Hardware version %d.%d",
+            info.product_ver >> 8, info.product_ver & 0xFF);
     } catch(std::exception &e) {
-        SoapySDR_logf(SOAPY_SDR_WARNING, "Could not read HAT ID. Assuming hardware version %d.%d", product_ver >> 8, product_ver & 0xFF);
+        SoapySDR_logf(SOAPY_SDR_WARNING, "Could not read HAT ID. Assuming hardware version %d.%d",
+            info.product_ver >> 8, info.product_ver & 0xFF);
     }
-    if (product_id != product_id_expected) {
-        SoapySDR_logf(SOAPY_SDR_WARNING, "Unexpected product ID 0x%04x. Are you sure the correct HAT is connected?", product_id);
+    if (info.product_id != product_id_expected) {
+        SoapySDR_logf(SOAPY_SDR_WARNING, "Unexpected product ID 0x%04x. Are you sure the correct HAT is connected?", info.product_id);
     }
-    return product_ver;
+    return info;
 }
 
 // Convert raw received samples to CF32.
@@ -544,6 +556,8 @@ private:
     // Buffer for TX samples after type conversion.
     std::vector<uint64_t> buffer_tx;
 
+    struct hat_info hat_info;
+
     // Convert a SoapySDR nanosecond timestamp to a sample counter.
     int64_t timestamp_to_samples(long long timestamp) const
     {
@@ -655,7 +669,7 @@ private:
  **********************************************************************/
 
 public:
-    SoapySX(const SoapySDR::Kwargs &args, uint16_t hwversion):
+    SoapySX(const SoapySDR::Kwargs &args, struct hat_info hat_info):
         masterClock(32.0e6),
         sampleRate(125.0e3),
 
@@ -669,13 +683,13 @@ public:
             0
         ),
         gpio_rx(gpio,
-            hwversion == 0x0100 ? 13 : 23,
+            hat_info.product_ver == 0x0100 ? 13 : 23,
             "SX RX",
             GPIO_V2_LINE_FLAG_OUTPUT,
             1
         ),
         gpio_tx(gpio,
-            hwversion == 0x0100 ? 12 : 22,
+            hat_info.product_ver == 0x0100 ? 12 : 22,
             "SX TX",
             GPIO_V2_LINE_FLAG_OUTPUT,
             1
@@ -685,12 +699,14 @@ public:
         alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
         tx_threshold2(0.0f),
         linked(false),
-        regs{0}
+        regs{0},
 
         // Allocate reasonably large buffers by default.
         // Their size will be increased if needed.
-        ,buffer_rx(8192)
-        ,buffer_tx(8192)
+        buffer_rx(8192),
+        buffer_tx(8192),
+
+        hat_info(hat_info)
     {
         (void)args;
 
@@ -1561,6 +1577,14 @@ public:
     SoapySDR::Kwargs getHardwareInfo(void) const
     {
         SoapySDR::Kwargs args;
+        args["soapysx_tag"] = SoapySX_tag;
+        args["soapysx_commit"] = SoapySX_commit;
+        if (hat_info.read_success) {
+            args["hardware_version"] = std::to_string(hat_info.product_ver >> 8)
+                               + "." + std::to_string(hat_info.product_ver & 0xFF);
+        } else {
+            args["hardware_version"] = "unknown";
+        }
         return args;
     }
 
@@ -1622,7 +1646,8 @@ static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
  **********************************************************************/
 static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args)
 {
-    return new SoapySX(args, get_hardware_version());
+    SoapySDR::logf(SOAPY_SDR_INFO, "SoapySX version %s %s", SoapySX_tag, SoapySX_commit);
+    return new SoapySX(args, read_hat_info());
 }
 
 /***********************************************************************

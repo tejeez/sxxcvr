@@ -2,7 +2,7 @@
 # Project setup -- only needed if device support is a stand-alone build
 # We recommend that the support module be built in-tree with the driver.
 ########################################################################
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.3...3.10)
 project(SoapySX CXX)
 enable_testing()
 
@@ -21,6 +21,25 @@ set(MY_DEVICE_INCLUDE_DIRS "")
 set(MY_DEVICE_LIBRARIES "asound")
 
 ########################################################################
+# Source files
+########################################################################
+set(MY_SOURCE_FILES SoapySX.cpp)
+
+########################################################################
+# Add version
+########################################################################
+set(VERSION_SOURCE_FILE version.cpp)
+set(VERSION_SCRIPT "${CMAKE_SOURCE_DIR}/version.sh")
+
+find_package(Git REQUIRED)
+
+add_custom_command(
+    OUTPUT ${VERSION_SOURCE_FILE}
+    COMMAND "${VERSION_SCRIPT}" "${GIT_EXECUTABLE}" > "${VERSION_SOURCE_FILE}"
+    DEPENDS ../.git/index ${VERSION_SCRIPT} ${MY_SOURCE_FILES}
+)
+
+########################################################################
 # build the module
 ########################################################################
 find_package(SoapySDR CONFIG)
@@ -33,7 +52,7 @@ endif ()
 include_directories(${MY_DEVICE_INCLUDE_DIRS})
 SOAPY_SDR_MODULE_UTIL(
     TARGET SXSupport
-    SOURCES SoapySX.cpp
+    SOURCES ${MY_SOURCE_FILES} ${VERSION_SOURCE_FILE}
     LIBRARIES ${MY_DEVICE_LIBRARIES}
 )
 
