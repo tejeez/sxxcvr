@@ -1316,7 +1316,7 @@ public:
             write_registers_to_chip(0x0C, 1);
         } else {
             if (name == "DAC") {
-                set_register_bits(0x08, 4, 3, 3-quantized);
+                set_register_bits(0x08, 4, 3, quantized);
             } else if (name == "MIXER") {
                 set_register_bits(0x08, 0, 4, quantized);
             }
@@ -1343,7 +1343,7 @@ public:
             }
         } else {
             if (name == "DAC") {
-                quantized = 3 - get_cached_register_bits(0x08, 4, 3);
+                quantized = get_cached_register_bits(0x08, 4, 3);
             } else if (name == "MIXER") {
                 quantized = get_cached_register_bits(0x08, 0, 4);
             }
