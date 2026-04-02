@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 
-import os
+import threading
 
 import SoapySDR
 import numpy as np
-import threading
 
 class Measurement:
     def __init__(
@@ -22,6 +21,7 @@ class Measurement:
         dac_value = 1.0+1.0j
     ):
         self.running = True
+        self.tx_ready = False
         self._tx_thread = None
         self.pll_lock_margin_ns = pll_lock_margin_ns
 
@@ -37,7 +37,7 @@ class Measurement:
         self.dev.setGain(SoapySDR.SOAPY_SDR_TX, 0, 'MIXER', 30.0)
 
         # How many samples to read at a time to wait to receive the right signal
-        self._rx_wait_length = rx_measurement_length // 8
+        rx_wait_length = rx_measurement_length // 8
 
         # RX intermediate frequency in Hz
         self._rx_if = self._sample_rate * rx_if_cycles_in_measurement / rx_measurement_length
@@ -52,12 +52,12 @@ class Measurement:
             dtype=np.complex64
         )) * window * (1.0 / np.sum(window))
 
-        self._tx_signal = np.full(self._rx_wait_length, dac_value, dtype=np.complex64)
+        self._tx_signal = np.full(rx_wait_length, dac_value, dtype=np.complex64)
         self._rx_buffer = np.zeros(rx_measurement_length, dtype=np.complex64)
-        self._rx_wait_buffer = np.zeros(self._rx_wait_length, dtype=np.complex64)
+        self._rx_wait_buffer = np.zeros(rx_wait_length, dtype=np.complex64)
 
-        self.rx = self.dev.setupStream(SoapySDR.SOAPY_SDR_RX, SoapySDR.SOAPY_SDR_CF32, [0], {'period': str(self._rx_wait_length)})
-        self.tx = self.dev.setupStream(SoapySDR.SOAPY_SDR_TX, SoapySDR.SOAPY_SDR_CF32, [0], {'period': str(self._rx_wait_length)})
+        self.rx = self.dev.setupStream(SoapySDR.SOAPY_SDR_RX, SoapySDR.SOAPY_SDR_CF32, [0], {'period': str(rx_wait_length)})
+        self.tx = self.dev.setupStream(SoapySDR.SOAPY_SDR_TX, SoapySDR.SOAPY_SDR_CF32, [0], {'period': str(rx_wait_length)})
 
         self.dev.activateStream(self.rx)
         self.dev.activateStream(self.tx)
@@ -73,6 +73,8 @@ class Measurement:
     def _tx_thread_main(self):
         while self.running:
             self.dev.writeStream(self.tx, [self._tx_signal], len(self._tx_signal))
+            self.tx_ready = True
+        self.tx_ready = False
 
     def measure(self, frequency):
         self.dev.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, frequency - self._rx_if)
@@ -82,18 +84,23 @@ class Measurement:
         # Make short reads of RX stream until we get a signal after this point.
         # Add some margin to have some time for PLLs to lock.
         frequency_changed_time = self.dev.getHardwareTime()
-        while True:
-            ret = self.dev.readStream(self.rx, [self._rx_buffer], len(self._rx_wait_buffer))
-            if ret.ret < 0 or not self.running:
-                print(ret)
+
+        # Make sure something is being transmitted first
+        while self.running and not self.tx_ready:
+            self.dev.readStream(self.rx, [self._rx_wait_buffer], len(self._rx_wait_buffer))
+
+        while self.running:
+            ret = self.dev.readStream(self.rx, [self._rx_wait_buffer], len(self._rx_wait_buffer))
+            if ret.ret < 0:
+                print('RX wait error:', ret)
                 return
             next_rx_time = ret.timeNs + SoapySDR.ticksToTimeNs(ret.ret, self._sample_rate)
             if next_rx_time - frequency_changed_time >= self.pll_lock_margin_ns:
                 break
 
-        self.dev.readStream(self.rx, [self._rx_buffer], len(self._rx_buffer))
-        if ret.ret < 0:
-            print(ret)
+        ret = self.dev.readStream(self.rx, [self._rx_buffer], len(self._rx_buffer))
+        if ret.ret != len(self._tone):
+            print('RX error:', ret)
             return
 
         correlation = np.dot(self._rx_buffer, self._tone)
@@ -107,8 +114,8 @@ def main(freq_start = 432.1e6, freq_step = 0.2e6, freq_num = 30):
     for freq_i in range(freq_num):
         freq = freq_start + freq_step * freq_i
         db = measurement.measure(freq)
-        bar = int(round(min(max(db + 70.0, 0), 60)))
-        print('%10.2f MHz %10.2f dB %s' % (freq * 1e-6, db, '#'*bar))
+        bar = int(round(min(max((db + 120.0) / 2.0, 0), 55)))
+        print('%8.2f MHz %7.2f dB %s' % (freq * 1e-6, db, '#'*bar))
 
     measurement.stop()
 
