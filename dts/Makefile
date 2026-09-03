@@ -43,6 +43,8 @@ endef
 
 all: $(BUILD_DIR)/eeprom.bin
 
+overlays: $(BUILD_DIR)/sx1255_m17_raspberrypi.dtbo
+
 $(BUILD_DIR):
 	mkdir -p -- "$(BUILD_DIR)"
 
@@ -52,6 +54,9 @@ $(BUILD_DIR)/eeprom_settings.txt: Makefile | $(BUILD_DIR)
 	$(file > $@,$(HAT_EEPROM_SETTINGS))
 
 $(BUILD_DIR)/sx1255_raspberrypi.dtbo: sx1255_raspberrypi.dts | $(BUILD_DIR)
+	dtc -Wno-unit_address_vs_reg "$<" > "$@"
+
+$(BUILD_DIR)/sx1255_m17_raspberrypi.dtbo: sx1255_m17_raspberrypi.dts | $(BUILD_DIR)
 	dtc -Wno-unit_address_vs_reg "$<" > "$@"
 
 $(BUILD_DIR)/eeprom.bin: $(BUILD_DIR)/eeprom_settings.txt $(BUILD_DIR)/sx1255_raspberrypi.dtbo | $(BUILD_DIR)
@@ -64,4 +69,4 @@ write_eeprom: $(BUILD_DIR)/eeprom.bin
 clean:
 	rm -rf -- "$(BUILD_DIR)"
 
-.PHONY: all write_eeprom clean
+.PHONY: all overlays write_eeprom clean

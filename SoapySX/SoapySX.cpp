@@ -8,8 +8,10 @@
 #include <string.h>
 #include <cassert>
 #include <climits>
+#include <cmath>
 #include <chrono>
 #include <fstream>
+#include <memory>
 #include <thread>
 #include <mutex>
 
@@ -77,7 +79,135 @@ struct hat_info {
     bool read_success;
 };
 
-static struct hat_info read_hat_info(void)
+struct board_config {
+    std::string name;
+    std::string spi_path;
+    std::string gpiochip_path;
+    std::string alsa_rx_path;
+    std::string alsa_tx_path;
+    unsigned reset_gpio;
+    unsigned rx_gpio;
+    unsigned tx_gpio;
+    bool has_rf_switch;
+    bool encode_pa_control;
+    bool fixed_master_clock;
+    double master_clock;
+};
+
+static std::string get_arg(
+    const SoapySDR::Kwargs &args,
+    const std::string &key,
+    const std::string &default_value)
+{
+    const auto it = args.find(key);
+    return it == args.end() ? default_value : it->second;
+}
+
+static unsigned get_unsigned_arg(
+    const SoapySDR::Kwargs &args,
+    const std::string &key,
+    unsigned default_value)
+{
+    const auto it = args.find(key);
+    if (it == args.end())
+        return default_value;
+
+    size_t parsed = 0;
+    unsigned long value = std::stoul(it->second, &parsed, 0);
+    if (parsed != it->second.size() || value > UINT_MAX)
+        throw std::runtime_error("Invalid " + key + " value: " + it->second);
+    return (unsigned)value;
+}
+
+static bool file_contains(const char *filename, const std::string &needle)
+{
+    std::ifstream file(filename, std::ios::binary);
+    if (!file)
+        return false;
+    const std::string value(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>());
+    return value.find(needle) != std::string::npos;
+}
+
+static bool m17_overlay_is_loaded(void)
+{
+    return file_contains(
+        "/proc/device-tree/m17-sx1255-hat/compatible",
+        "m17-project,sx1255-hat");
+}
+
+static struct board_config resolve_board_config(
+    const SoapySDR::Kwargs &args,
+    const struct hat_info &hat)
+{
+    std::string board = get_arg(args, "board", "auto");
+    if (board == "auto")
+        board = m17_overlay_is_loaded() ? "m17" : "sxceiver";
+
+    struct board_config config;
+    if (board == "m17" || board == "m17-hat") {
+        config = {
+            "m17",
+            "/dev/spidev0.0",
+            "/dev/gpiochip0",
+            "hw:CARD=SX1255,DEV=1",
+            "hw:CARD=SX1255,DEV=0",
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            32.0e6,
+        };
+    } else if (board == "sxceiver" || board == "legacy") {
+        config = {
+            "sxceiver",
+            "/dev/spidev0.0",
+            "/dev/gpiochip0",
+            "hw:CARD=SX1255,DEV=1",
+            "hw:CARD=SX1255,DEV=0",
+            5,
+            hat.product_ver == 0x0100 ? 13u : 23u,
+            hat.product_ver == 0x0100 ? 12u : 22u,
+            true,
+            true,
+            false,
+            32.0e6,
+        };
+    } else {
+        throw std::runtime_error(
+            "Unknown SX1255 board profile '" + board
+            + "' (expected auto, m17, or sxceiver)");
+    }
+
+    config.spi_path = get_arg(args, "spi", config.spi_path);
+    config.gpiochip_path = get_arg(args, "gpiochip", config.gpiochip_path);
+    const auto alsa_card = args.find("alsa_card");
+    if (alsa_card != args.end()) {
+        config.alsa_rx_path = "hw:CARD=" + alsa_card->second + ",DEV=1";
+        config.alsa_tx_path = "hw:CARD=" + alsa_card->second + ",DEV=0";
+    }
+    config.alsa_rx_path = get_arg(args, "alsa_rx", config.alsa_rx_path);
+    config.alsa_tx_path = get_arg(args, "alsa_tx", config.alsa_tx_path);
+    config.reset_gpio = get_unsigned_arg(args, "reset_gpio", config.reset_gpio);
+
+    const auto clock = args.find("master_clock");
+    if (clock != args.end()) {
+        size_t parsed = 0;
+        config.master_clock = std::stod(clock->second, &parsed);
+        if (parsed != clock->second.size()
+            || config.master_clock <= 0
+            || !std::isfinite(config.master_clock))
+            throw std::runtime_error("master_clock must be positive");
+        config.fixed_master_clock = true;
+    }
+
+    return config;
+}
+
+static struct hat_info read_hat_info(bool warn_if_missing)
 {
     const uint16_t product_id_expected = 0x1255;
     // Default assumption if ID cannot be read
@@ -89,8 +219,10 @@ static struct hat_info read_hat_info(void)
         SoapySDR_logf(SOAPY_SDR_INFO, "Hardware version %d.%d",
             info.product_ver >> 8, info.product_ver & 0xFF);
     } catch(std::exception &e) {
-        SoapySDR_logf(SOAPY_SDR_WARNING, "Could not read HAT ID. Assuming hardware version %d.%d",
-            info.product_ver >> 8, info.product_ver & 0xFF);
+        if (warn_if_missing) {
+            SoapySDR_logf(SOAPY_SDR_WARNING, "Could not read HAT ID. Assuming hardware version %d.%d",
+                info.product_ver >> 8, info.product_ver & 0xFF);
+        }
     }
     if (info.product_id != product_id_expected) {
         SoapySDR_logf(SOAPY_SDR_WARNING, "Unexpected product ID 0x%04x. Are you sure the correct HAT is connected?", info.product_id);
@@ -113,7 +245,14 @@ static inline void convert_rx_buffer(const void *src, size_t src_offset, void *d
 
 // Convert CF32 to raw transmit samples.
 // TODO: Support other formats and add format as a parameter.
-static inline void convert_tx_buffer(const void *src, size_t src_offset, void *dest, size_t dest_offset, size_t length, float tx_threshold2)
+static inline void convert_tx_buffer(
+    const void *src,
+    size_t src_offset,
+    void *dest,
+    size_t dest_offset,
+    size_t length,
+    bool encode_pa_control,
+    float tx_threshold2)
 {
     const float *src_ = (const float*)src + src_offset*2;
     int32_t *dest_ = (int32_t*)dest + dest_offset*2;
@@ -123,14 +262,15 @@ static inline void convert_tx_buffer(const void *src, size_t src_offset, void *d
         float fi = src_[i], fq = src_[i+1];
         int32_t vi = scaling * std::max(std::min(fi, 1.0f), -1.0f);
         int32_t vq = scaling * std::max(std::min(fq, 1.0f), -1.0f);
-        // Second lowest bit of each "I" sample controls RX/TX switching.
-        // Set the lowest bit to the same value just in case.
-        // Let's also reserve the 2 lowest bits of "Q" samples
-        // for future extensions and keep them as 0.
-        vi &= 0xFFFFFFFCL;
-        vq &= 0xFFFFFFFCL;
-        if (fi*fi + fq*fq >= tx_threshold2)
-            vi |= 0b11L;
+        if (encode_pa_control) {
+            // On SXceiver boards, the second lowest bit of each "I"
+            // sample controls RX/TX switching. Set the lowest bit to the
+            // same value and reserve the 2 lowest "Q" bits.
+            vi &= 0xFFFFFFFCL;
+            vq &= 0xFFFFFFFCL;
+            if (fi*fi + fq*fq >= tx_threshold2)
+                vi |= 0b11L;
+        }
         dest_[i  ] = vi;
         dest_[i+1] = vq;
     }
@@ -368,7 +508,7 @@ goto alsa_error; } } while(0)
 
 class AlsaPcm {
 public:
-    const char *name;
+    std::string name;
     snd_pcm_t *pcm;
     mutable std::mutex mutex;
     snd_pcm_stream_t dir;
@@ -379,7 +519,7 @@ public:
     snd_pcm_uframes_t hwp_period_size;
     snd_pcm_uframes_t hwp_buffer_size;
 
-    AlsaPcm(const char *name, snd_pcm_stream_t dir):
+    AlsaPcm(const std::string &name, snd_pcm_stream_t dir):
         name(name),
         pcm(NULL),
         dir(dir),
@@ -394,7 +534,7 @@ public:
 
     void open(void)
     {
-        ALSACHECK(snd_pcm_open(&pcm, name, dir, 0));
+        ALSACHECK(snd_pcm_open(&pcm, name.c_str(), dir, 0));
         return;
 
         alsa_error:
@@ -524,6 +664,7 @@ public:
 class SoapySX : public SoapySDR::Device
 {
 private:
+    struct board_config board;
     double masterClock;
     double sampleRate;
 
@@ -533,7 +674,9 @@ private:
 
     Spi spi;
     GpioChip gpio;
-    GpioLine gpio_reset, gpio_rx, gpio_tx;
+    std::unique_ptr<GpioLine> gpio_reset;
+    std::unique_ptr<GpioLine> gpio_rx;
+    std::unique_ptr<GpioLine> gpio_tx;
     AlsaPcm alsa_rx;
     AlsaPcm alsa_tx;
 
@@ -611,9 +754,9 @@ private:
     {
         SoapySDR_logf(SOAPY_SDR_DEBUG, "Resetting chip");
         // Timing from datasheet Figure 6-2: Manual Reset Timing Diagram
-        gpio_reset.set_value(1);
+        gpio_reset->set_value(1);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        gpio_reset.set_value(0);
+        gpio_reset->set_value(0);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
@@ -670,33 +813,34 @@ private:
 
 public:
     SoapySX(const SoapySDR::Kwargs &args, struct hat_info hat_info):
-        masterClock(32.0e6),
-        sampleRate(125.0e3),
+        board(resolve_board_config(args, hat_info)),
+        masterClock(board.master_clock),
+        sampleRate(board.master_clock / 256.0),
 
-        spi("/dev/spidev0.0"),
+        spi(board.spi_path.c_str()),
 
-        gpio("/dev/gpiochip0"),
-        gpio_reset(gpio,
-            5,
+        gpio(board.gpiochip_path.c_str()),
+        gpio_reset(std::make_unique<GpioLine>(gpio,
+            board.reset_gpio,
             "SX reset",
             GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_OPEN_SOURCE,
             0
-        ),
-        gpio_rx(gpio,
-            hat_info.product_ver == 0x0100 ? 13 : 23,
+        )),
+        gpio_rx(board.has_rf_switch ? std::make_unique<GpioLine>(gpio,
+            board.rx_gpio,
             "SX RX",
             GPIO_V2_LINE_FLAG_OUTPUT,
             1
-        ),
-        gpio_tx(gpio,
-            hat_info.product_ver == 0x0100 ? 12 : 22,
+        ) : nullptr),
+        gpio_tx(board.has_rf_switch ? std::make_unique<GpioLine>(gpio,
+            board.tx_gpio,
             "SX TX",
             GPIO_V2_LINE_FLAG_OUTPUT,
             1
-        ),
+        ) : nullptr),
 
-        alsa_rx(AlsaPcm("hw:CARD=SX1255,DEV=1", SND_PCM_STREAM_CAPTURE)),
-        alsa_tx(AlsaPcm("hw:CARD=SX1255,DEV=0", SND_PCM_STREAM_PLAYBACK)),
+        alsa_rx(AlsaPcm(board.alsa_rx_path, SND_PCM_STREAM_CAPTURE)),
+        alsa_tx(AlsaPcm(board.alsa_tx_path, SND_PCM_STREAM_PLAYBACK)),
         tx_threshold2(0.0f),
         linked(false),
         regs{0},
@@ -708,13 +852,15 @@ public:
 
         hat_info(hat_info)
     {
-        (void)args;
-
-        SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapySX");
+        SoapySDR_logf(SOAPY_SDR_INFO, "Initializing SoapySX for %s board", board.name.c_str());
 
         reset_chip();
         init_chip();
-        detect_clock();
+        if (board.fixed_master_clock) {
+            SoapySDR_logf(SOAPY_SDR_INFO, "Using %.1f MHz reference clock", masterClock / 1.0e6);
+        } else {
+            detect_clock();
+        }
         // Open ALSA devices now when I2S clocks are already running.
         // I am not sure if this makes any difference but just in case.
         alsa_rx.open();
@@ -1087,7 +1233,9 @@ public:
         if (length > buffer_tx.size())
             buffer_tx.resize(length);
 
-        convert_tx_buffer(buffs[0], 0, buffer_tx.data(), 0, length, tx_threshold2);
+        convert_tx_buffer(
+            buffs[0], 0, buffer_tx.data(), 0, length,
+            board.encode_pa_control, tx_threshold2);
 
         if (length > 0) {
             snd_pcm_sframes_t samples_written = snd_pcm_writei(pcm, buffer_tx.data(), length);
@@ -1476,18 +1624,25 @@ public:
     {
         // PA control modes
         if (key == "PA") {
+            if (!board.has_rf_switch) {
+                SoapySDR_logf(
+                    SOAPY_SDR_DEBUG,
+                    "Ignoring external PA setting on %s board",
+                    board.name.c_str());
+                return;
+            }
             if (value == "ON") {
                 // PA always on
-                gpio_tx.set_value(1);
-                gpio_rx.set_value(0);
+                gpio_tx->set_value(1);
+                gpio_rx->set_value(0);
             } else if (value == "OFF") {
                 // PA always off
-                gpio_tx.set_value(0);
-                gpio_rx.set_value(1);
+                gpio_tx->set_value(0);
+                gpio_rx->set_value(1);
             } else if (value == "AUTO") {
                 // PA on/off controlled by TX stream (default)
-                gpio_tx.set_value(1);
-                gpio_rx.set_value(1);
+                gpio_tx->set_value(1);
+                gpio_rx->set_value(1);
             }
         }
     }
@@ -1579,6 +1734,11 @@ public:
         SoapySDR::Kwargs args;
         args["soapysx_tag"] = SoapySX_tag;
         args["soapysx_commit"] = SoapySX_commit;
+        args["board"] = board.name;
+        args["reset_gpio"] = std::to_string(board.reset_gpio);
+        args["spi"] = board.spi_path;
+        args["alsa_rx"] = board.alsa_rx_path;
+        args["alsa_tx"] = board.alsa_tx_path;
         if (hat_info.read_success) {
             args["hardware_version"] = std::to_string(hat_info.product_ver >> 8)
                                + "." + std::to_string(hat_info.product_ver & 0xFF);
@@ -1628,14 +1788,32 @@ public:
  **********************************************************************/
 static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
 {
-    (void)args;
     SoapySDR::KwargsList devices;
 
     // TODO: check whether a device is actually found
 
     SoapySDR::Kwargs device;
-    device["label"] = "sx";
+    const bool auto_m17 = get_arg(args, "board", "auto") == "auto"
+                       && m17_overlay_is_loaded();
+    const std::string board = auto_m17 ? "m17" : get_arg(args, "board", "auto");
+    device["label"] = board == "m17" || board == "m17-hat"
+                    ? "SX1255 (M17 HAT)"
+                    : "sx";
     device["driver"] = "sx";
+    if (board != "auto")
+        device["board"] = board;
+
+    // Discovery results are passed to makeDevice by SoapySDR. Preserve
+    // explicit transport overrides supplied in the discovery string.
+    const char *override_keys[] = {
+        "spi", "gpiochip", "reset_gpio", "alsa_card", "alsa_rx", "alsa_tx",
+        "master_clock"
+    };
+    for (const char *key: override_keys) {
+        const auto it = args.find(key);
+        if (it != args.end())
+            device[key] = it->second;
+    }
     devices.push_back(device);
 
     return devices;
@@ -1647,7 +1825,10 @@ static SoapySDR::KwargsList findDevice(const SoapySDR::Kwargs &args)
 static SoapySDR::Device *makeDevice(const SoapySDR::Kwargs &args)
 {
     SoapySDR::logf(SOAPY_SDR_INFO, "SoapySX version %s %s", SoapySX_tag, SoapySX_commit);
-    return new SoapySX(args, read_hat_info());
+    const std::string board = get_arg(args, "board", "auto");
+    const bool is_m17 = board == "m17" || board == "m17-hat"
+                     || (board == "auto" && m17_overlay_is_loaded());
+    return new SoapySX(args, read_hat_info(!is_m17));
 }
 
 /***********************************************************************
