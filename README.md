@@ -71,6 +71,31 @@ for reset, `/dev/spidev0.0`, and the `SX1255` ALSA card by default. The
 `alsa_tx` are mainly intended for API callers; use `alsa_card` in a
 comma-separated SoapySDR command-line device string.
 
+## SX1255 gain stages
+
+Applications can set the SX1255 analog stages by name through the SoapySDR
+gain API:
+
+| Direction | Stage | Range | Nominal step |
+|---|---|---:|---:|
+| RX | `LNA` | 0–48 dB | 6 dB |
+| RX | `PGA` | 0–30 dB | 2 dB |
+| TX | `DAC` | 0–9 dB | 3 dB |
+| TX | `MIXER` | 0–30 dB | 2 dB |
+
+For example, Python callers can request explicit RX placement with:
+
+```python
+device.setGain(SoapySDR.SOAPY_SDR_RX, 0, "LNA", 36)
+device.setGain(SoapySDR.SOAPY_SDR_RX, 0, "PGA", 14)
+```
+
+Aggregate gain calls remain supported for compatibility. SoapySX distributes
+an aggregate request between the applicable stages and quantizes each stage to
+a value supported by the chip. Applications that need repeatable noise figure,
+headroom, or TX linearity should use the named stages and read back the applied
+values.
+
 ## Features
 SoapySX provides some support for timestamps which are used by some
 applications to obtain a known timing relationship between transmitted and
